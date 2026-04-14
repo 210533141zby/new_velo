@@ -15,12 +15,8 @@
 
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import axios from 'axios';
 import { useDebounceFn } from '@vueuse/core';
-
-const api = axios.create({
-  baseURL: 'http://localhost:8000/api/v1',
-});
+import request from '@/api/request';
 
 export interface Document {
   id: number;
@@ -28,6 +24,7 @@ export interface Document {
   content: string;
   created_at: string;
   updated_at: string;
+  folder_id?: number | null;
 }
 
 export type SaveStatus = 'saved' | 'saving' | 'error' | 'unsaved';
@@ -66,8 +63,8 @@ export const useEditorStore = defineStore('editor', () => {
    */
   async function fetchDocuments() {
     try {
-      const res = await api.get('/documents/');
-      documents.value = res.data;
+      const res = await request.get('/documents/');
+      documents.value = res as Document[];
       if (!currentDocument.value && documents.value.length > 0) {
         await loadDocument(documents.value[0].id);
       }
@@ -86,11 +83,10 @@ export const useEditorStore = defineStore('editor', () => {
    */
   async function createDocument() {
     try {
-      const res = await api.post('/documents/', {
+      const newDoc = await request.post('/documents/', {
         title: '',
         content: '',
-      });
-      const newDoc = res.data as Document;
+      }) as Document;
       // Force title to be empty if it comes back as Untitled or null (defensive fix)
       // We check for various forms of 'Untitled' to be safe
       const titleLower = (newDoc.title || '').toLowerCase().trim();
@@ -110,8 +106,8 @@ export const useEditorStore = defineStore('editor', () => {
    */
   async function loadDocument(id: number) {
     try {
-      const res = await api.get(`/documents/${id}`);
-      currentDocument.value = res.data as Document;
+      const doc = await request.get(`/documents/${id}`) as Document;
+      currentDocument.value = doc;
       saveStatus.value = 'saved';
     } catch (e) {
       console.error('Failed to load document', e);
@@ -130,7 +126,7 @@ export const useEditorStore = defineStore('editor', () => {
    */
   async function deleteDocument(id: number) {
     try {
-      await api.delete(`/documents/${id}`);
+      await request.delete(`/documents/${id}`);
       const idx = documents.value.findIndex(d => d.id === id);
       if (idx !== -1) {
         documents.value.splice(idx, 1);
@@ -162,11 +158,11 @@ export const useEditorStore = defineStore('editor', () => {
     if (!currentDocument.value) return;
     saveStatus.value = 'saving';
     try {
-      const res = await api.put(`/documents/${currentDocument.value.id}`, {
+      const updatedDoc = await request.put(`/documents/${currentDocument.value.id}`, {
         title: currentDocument.value.title,
         content: currentDocument.value.content,
-      });
-      currentDocument.value = { ...currentDocument.value, ...(res.data as Partial<Document>) };
+      }) as Partial<Document>;
+      currentDocument.value = { ...currentDocument.value, ...updatedDoc };
       
       const idx = documents.value.findIndex(d => d.id === currentDocument.value?.id);
       if (idx !== -1) documents.value[idx] = currentDocument.value;

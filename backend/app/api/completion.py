@@ -33,6 +33,7 @@ class CompletionRequest(BaseModel):
     prefix: str
     suffix: str
     language: Optional[str] = None
+    trigger_mode: Optional[str] = None
 
 @router.post("/completion")
 async def generate_completion(request: CompletionRequest):
@@ -46,7 +47,7 @@ async def generate_completion(request: CompletionRequest):
         # 2. 增加日志，确认请求到达
         logger.info(f"收到补全请求: prefix_len={len(request.prefix)}, suffix_len={len(request.suffix)}")
 
-        result = await complete_text(request.prefix, request.suffix)
+        result = await complete_text(request.prefix, request.suffix, trigger_mode=request.trigger_mode)
         
         if result is None:
             logger.warning("LLM 服务返回 None")

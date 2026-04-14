@@ -1,4 +1,3 @@
-
 <script setup lang="ts">
 /**
  * TiptapEditor.vue - 核心富文本编辑器组件 (修复版)
@@ -7,7 +6,7 @@ import { useEditor, EditorContent } from '@tiptap/vue-3'
 import { Extension, Editor } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import { EditorView } from '@tiptap/pm/view' // 补充导入
+import { EditorView } from '@tiptap/pm/view'
 // @ts-ignore
 import StarterKit from '@tiptap/starter-kit'
 import { Markdown } from 'tiptap-markdown'
@@ -21,11 +20,10 @@ import { useDebounceFn } from '@vueuse/core'
 import MarkdownIt from 'markdown-it'
 // @ts-ignore
 import taskLists from 'markdown-it-task-lists'
-import { 
-  Bold, Italic, Strikethrough, Code, Heading1, Heading2, Heading3, 
+import {
+  Bold, Italic, Strikethrough, Code, Heading1, Heading2, Heading3,
   List, ListOrdered, Quote, Minus, CheckSquare
 } from 'lucide-vue-next'
-import axios from 'axios'
 
 const props = defineProps<{ modelValue: string }>()
 const emit = defineEmits(['update:modelValue'])
@@ -37,85 +35,181 @@ md.use(taskLists)
 // --- 1. Ghost Text (幽灵文本) 状态管理 ---
 const ghostText = ref('')
 const ghostPos = ref<number | null>(null)
+let completionTimer: ReturnType<typeof setTimeout> | null = null
+let completionRequestVersion = 0
+let activeCompletionAbortController: AbortController | null = null
+let isApplyingExternalContent = false
 
-// 独立的 API 调用函数
-const fetchCompletion = async (prefix: string, suffix: string) => {
-  try {
-    const res = await axios.post('/api/v1/completion', {
-      prefix,
-      suffix,
-      language: 'markdown'
-    })
-    return res.data.completion
-  } catch (e) {
-    console.error('[GhostDebug] 请求失败:', e)
-    return ''
+type CompletionMode = 'manual' | 'auto'
+
+const AUTO_COMPLETION_DEBOUNCE_MS = 120
+const COMPLETION_REQUEST_TIMEOUT_MS = 9000
+const COMPLETION_CONTEXT_PROFILES: Record<CompletionMode, { prefixWindow: number; suffixWindow: number }> = {
+  manual: {
+    prefixWindow: 1280,
+    suffixWindow: 260,
+  },
+  auto: {
+    prefixWindow: 640,
+    suffixWindow: 128,
+  },
+}
+
+const dismissGhostText = () => {
+  ghostText.value = ''
+  ghostPos.value = null
+}
+
+const invalidatePendingCompletion = () => {
+  if (completionTimer) {
+    clearTimeout(completionTimer)
+    completionTimer = null
+  }
+
+  if (activeCompletionAbortController) {
+    activeCompletionAbortController.abort()
+    activeCompletionAbortController = null
+  }
+
+  completionRequestVersion += 1
+}
+
+const syncGhostDecoration = (editorInstance?: Editor | null) => {
+  const target = editorInstance ?? editor.value
+  if (target) {
+    target.view.dispatch(target.state.tr)
   }
 }
 
-// 独立的 Debounce Timer 变量
-let completionTimer: ReturnType<typeof setTimeout> | null = null
+const clearGhostText = (editorInstance?: Editor | null, invalidatePending = true) => {
+  if (invalidatePending) {
+    invalidatePendingCompletion()
+  } else if (completionTimer) {
+    clearTimeout(completionTimer)
+    completionTimer = null
+  }
 
-// 核心补全执行逻辑 (复用)
-const triggerCoreCompletion = async (editorInstance: Editor) => {
+  if (!ghostText.value && ghostPos.value === null) {
+    return
+  }
+
+  dismissGhostText()
+  syncGhostDecoration(editorInstance)
+}
+
+const fetchCompletion = async (prefix: string, suffix: string, triggerMode: CompletionMode) => {
+  const abortController = new AbortController()
+  activeCompletionAbortController = abortController
+  const timeoutId = window.setTimeout(() => abortController.abort(), COMPLETION_REQUEST_TIMEOUT_MS)
+
+  try {
+    const response = await fetch('/api/v1/completion', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prefix,
+        suffix,
+        language: 'markdown',
+        trigger_mode: triggerMode,
+      }),
+      signal: abortController.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(`Completion request failed: ${response.status}`)
+    }
+
+    const result = await response.json() as { completion?: string }
+    return result.completion ?? ''
+  } catch (error) {
+    if (!abortController.signal.aborted) {
+      console.error('[GhostDebug] 请求失败:', error)
+    }
+    return ''
+  } finally {
+    window.clearTimeout(timeoutId)
+    if (activeCompletionAbortController === abortController) {
+      activeCompletionAbortController = null
+    }
+  }
+}
+
+const triggerCoreCompletion = async (editorInstance: Editor, triggerMode: CompletionMode = 'manual') => {
   if (isComposing.value || !editorInstance) return
 
-  const { state } = editorInstance
-  const currentFrom = state.selection.from
-  
-  // 上下文截取：前文 1000 字符，后文 200 字符
-  const prefix = state.doc.textBetween(Math.max(0, currentFrom - 1000), currentFrom, '\n')
-  const suffix = state.doc.textBetween(currentFrom, Math.min(state.doc.content.size, currentFrom + 200), '\n')
+  invalidatePendingCompletion()
 
-  const completion = await fetchCompletion(prefix, suffix)
-  
-  if (completion) {
-    ghostText.value = completion
-    ghostPos.value = currentFrom
-    // 强制触发视图更新，渲染幽灵文字
-    editorInstance.view.dispatch(editorInstance.state.tr)
+  const { state } = editorInstance
+  const { from, empty } = state.selection
+  if (!empty) {
+    clearGhostText(editorInstance, false)
+    return
   }
+
+  if (ghostText.value || ghostPos.value !== null) {
+    dismissGhostText()
+    syncGhostDecoration(editorInstance)
+  }
+
+  const contextProfile = COMPLETION_CONTEXT_PROFILES[triggerMode]
+  const prefix = state.doc.textBetween(Math.max(0, from - contextProfile.prefixWindow), from, '\n')
+  const suffix = state.doc.textBetween(from, Math.min(state.doc.content.size, from + contextProfile.suffixWindow), '\n')
+  if (!prefix.trim()) {
+    clearGhostText(editorInstance, false)
+    return
+  }
+
+  const requestVersion = completionRequestVersion
+  const completion = await fetchCompletion(prefix, suffix, triggerMode)
+  if (requestVersion !== completionRequestVersion) return
+
+  if (!completion) {
+    clearGhostText(editorInstance, false)
+    return
+  }
+
+  ghostText.value = completion
+  ghostPos.value = from
+  syncGhostDecoration(editorInstance)
 }
 
-// 动态防抖补全触发逻辑 (统一处理入口)
 const handleAutoCompletion = (editorInstance: Editor) => {
   if (isComposing.value || !editorInstance) return
+  if (!editorInstance.isFocused) return
 
-  // 1. 清除旧定时器 (防抖核心)
-  if (completionTimer) clearTimeout(completionTimer)
+  if (completionTimer) {
+    clearTimeout(completionTimer)
+  }
 
-  // 2. 获取编辑器状态
   const { state } = editorInstance
-  const { selection, doc } = state
-  const { from } = selection
+  const { from, empty } = state.selection
+  if (!empty) {
+    clearGhostText(editorInstance, false)
+    return
+  }
 
-  // 3. 动态延迟判定
-  // 检查光标后 50 个字符，如果全是空白，则认为在文末 (Append Mode)
-  const suffixCheck = doc.textBetween(from, Math.min(doc.content.size, from + 50), '\n')
+  const suffixCheck = state.doc.textBetween(from, Math.min(state.doc.content.size, from + 50), '\n')
   const isAtEnd = !suffixCheck.trim()
-  
-  // NEW RULE: 只有文末才自动触发，文中必须手动触发
-  if (!isAtEnd) return
+  if (!isAtEnd) {
+    clearGhostText(editorInstance, false)
+    return
+  }
 
-  // 文末极速模式：250ms
-  const delay = 250
-
-  // 4. 启动新定时器
   completionTimer = setTimeout(() => {
-    triggerCoreCompletion(editorInstance)
-  }, delay)
+    completionTimer = null
+    void triggerCoreCompletion(editorInstance, 'auto')
+  }, AUTO_COMPLETION_DEBOUNCE_MS)
 }
 
 // --- 2. Ghost Text Tiptap Extension ---
-// 定义插件 Key
 const ghostPluginKey = new PluginKey<DecorationSet>('ghostText')
 
 const GhostTextExtension = Extension.create({
   name: 'ghostText',
 
-  // 移除 addKeyboardShortcuts，改用 handleKeyDown 统一处理
   addProseMirrorPlugins() {
-    // 捕获 Tiptap Editor 实例
     const editorInstance = this.editor
 
     return [
@@ -126,29 +220,25 @@ const GhostTextExtension = Extension.create({
             return DecorationSet.empty
           },
           apply(tr) {
-            // console.log('[GhostDebug] Extension Apply 触发', { hasGhostText: !!ghostText.value, trDocChanged: tr.docChanged })
-            // 每次文档变更，先清空幽灵文本 (除非是 debounce 刚回来)
             if (tr.docChanged || tr.selectionSet) {
-               if (ghostText.value) {
-                 ghostText.value = ''
-                 ghostPos.value = null
-                 return DecorationSet.empty
-               }
+              invalidatePendingCompletion()
+              if (ghostText.value || ghostPos.value !== null) {
+                dismissGhostText()
+              }
+              return DecorationSet.empty
             }
-            
-            // 如果 Vue Ref 里有值，就创建 Decoration
+
             if (ghostText.value && ghostPos.value !== null) {
-               const widget = document.createElement('span')
-               widget.className = 'ghost-text'
-               widget.textContent = ghostText.value
-               
-               // 创建 Widget Decoration
-               const deco = Decoration.widget(ghostPos.value, widget, {
-                 side: 1
-               })
-               return DecorationSet.create(tr.doc, [deco])
+              const widget = document.createElement('span')
+              widget.className = 'ghost-text'
+              widget.textContent = ghostText.value
+
+              const deco = Decoration.widget(ghostPos.value, widget, {
+                side: 1
+              })
+              return DecorationSet.create(tr.doc, [deco])
             }
-            
+
             return DecorationSet.empty
           }
         },
@@ -157,49 +247,33 @@ const GhostTextExtension = Extension.create({
             return ghostPluginKey.getState(state)
           },
           handleKeyDown(view: EditorView, event: KeyboardEvent) {
-            // 1. 手动触发快捷键 (Mod+Alt / Ctrl+Alt / Mod+Space)
             const isMod = event.ctrlKey || event.metaKey
             const isAlt = event.altKey
-            
-            // 方案 A: Mod + Alt
-            if (isMod && isAlt) {
-              console.log('[GhostDebug] Manual Trigger: Mod+Alt')
+            const isManualShortcut =
+              (isMod && isAlt) ||
+              (isMod && event.code === 'Space') ||
+              (isMod && event.key === 'Enter')
+
+            if (isManualShortcut) {
               event.preventDefault()
-              triggerCoreCompletion(editorInstance)
+              void triggerCoreCompletion(editorInstance, 'manual')
               return true
             }
 
-            // 方案 B: Mod + Space (备选)
-            if (isMod && event.code === 'Space') {
-              console.log('[GhostDebug] Manual Trigger: Mod+Space')
-              event.preventDefault()
-              triggerCoreCompletion(editorInstance)
-              return true
-            }
-
-            // 2. 拦截 Tab 键：采纳
             if (event.key === 'Tab' && ghostText.value && ghostPos.value !== null) {
               event.preventDefault()
-              
-              // 插入真实文本
               const tr = view.state.tr.insertText(ghostText.value, ghostPos.value)
               view.dispatch(tr)
-              
-              // 清空状态
-              ghostText.value = ''
-              ghostPos.value = null
+              clearGhostText(editorInstance, false)
               return true
             }
-            
-            // 3. 拦截 Esc 键：拒绝
+
             if (event.key === 'Escape' && ghostText.value) {
               event.preventDefault()
-              ghostText.value = ''
-              ghostPos.value = null
-              view.dispatch(view.state.tr)
+              clearGhostText(editorInstance, false)
               return true
             }
-            
+
             return false
           }
         }
@@ -208,12 +282,11 @@ const GhostTextExtension = Extension.create({
   }
 })
 
-// --- 3. Markdown Paste Logic Extension (修复循环引用) ---
+// --- 3. Markdown Paste Logic Extension ---
 const MarkdownPasteLogic = Extension.create({
   name: 'markdownPasteLogic',
-  
+
   addProseMirrorPlugins() {
-    // 关键修复：使用 (this as any) 绕过 TS 检查
     const editor = (this as any).editor as Editor
 
     return [
@@ -225,7 +298,6 @@ const MarkdownPasteLogic = Extension.create({
             const html = event.clipboardData?.getData('text/html')
 
             if (text) {
-              // 特征检测 Markdown
               const isMarkdownLike = /^(\s*#{1,6}\s|\s*>|\s*[-*]\s|\s*\d+\.\s|`{3})/.test(text)
 
               if (isMarkdownLike && (!html || html.length < text.length * 1.5)) {
@@ -249,14 +321,14 @@ const debouncedSave = useDebounceFn(() => {
 const updateStats = (editorInstance: Editor) => {
   const text = editorInstance.state.doc.textContent
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0
-  
+
   const selection = editorInstance.state.selection
   const { from } = selection
   const textBefore = editorInstance.state.doc.textBetween(0, from, '\n')
   const lines = textBefore.split('\n')
   const line = lines.length
   const col = lines[lines.length - 1].length + 1
-  
+
   store.updateStats(wordCount, line, col)
 }
 
@@ -264,92 +336,96 @@ const updateStats = (editorInstance: Editor) => {
 const editor = useEditor({
   content: props.modelValue,
   extensions: [
-    StarterKit.configure({ 
-      heading: { levels: [1, 2, 3, 4, 5, 6] }, 
+    StarterKit.configure({
+      heading: { levels: [1, 2, 3, 4, 5, 6] },
     }),
-    Markdown.configure({ 
-      html: true, 
-      transformPastedText: true, 
-      transformCopiedText: true, 
-    }), 
-    Typography, 
-    Image, 
-    TaskList, 
+    Markdown.configure({
+      html: true,
+      transformPastedText: true,
+      transformCopiedText: true,
+    }),
+    Typography,
+    Image,
+    TaskList,
     TaskItem.configure({ nested: true }),
-    GhostTextExtension,  // 注册 AI 补全插件
-    MarkdownPasteLogic,  // 注册粘贴逻辑插件
-  ],  
-  editorProps: { 
-    attributes: { 
-      class: 'prose prose-stone max-w-none focus:outline-none min-h-[calc(100vh-12rem)] px-12 py-10 bg-white shadow-sm mx-auto', 
+    GhostTextExtension,
+    MarkdownPasteLogic,
+  ],
+  editorProps: {
+    attributes: {
+      class: 'prose prose-stone max-w-none focus:outline-none min-h-[calc(100vh-12rem)] px-12 py-10 bg-white shadow-sm mx-auto',
     },
-    // 处理中文输入法选词结束
     handleDOMEvents: {
-      compositionend: (view, event) => {
-        // 1. 立即标记状态为非输入中
+      compositionend: () => {
         isComposing.value = false
-        console.log('[GhostDebug] Composition End Triggered')
-        
-        // 2. 强制触发一次补全检查 (延时一小会儿确保 DOM 已更新)
         setTimeout(() => {
-          handleAutoCompletion(editor.value as Editor)
+          if (editor.value) {
+            handleAutoCompletion(editor.value)
+          }
         }, 0)
-        
-        return false // 不阻止默认行为
+        return false
       },
-      compositionstart: (view, event) => {
+      compositionstart: () => {
         isComposing.value = true
-        console.log('[GhostDebug] Composition Start Triggered')
+        clearGhostText(editor.value)
         return false
       }
+    },
+  },
+  onUpdate: ({ editor, transaction }) => {
+    const isExternalContentUpdate = isApplyingExternalContent
+
+    if (isExternalContentUpdate) {
+      isApplyingExternalContent = false
     }
-  }, 
-  onUpdate: ({ editor }) => { 
-    // 1. 无论是否在输入中文，先打印日志证明函数活着 
-    console.log('[GhostDebug] onUpdate 触发', { isComposing: isComposing.value }); 
- 
-    // 2. 强制执行补全触发器 (移到 isComposing 检查之前!) 
-    handleAutoCompletion(editor); 
- 
-    // 3. 原有的数据同步逻辑保持不变 
-    if (isComposing.value) return; 
-    const markdown = (editor.storage as any).markdown.getMarkdown() 
-    emit('update:modelValue', markdown) 
-    store.updateContent(markdown) 
-    debouncedSave() 
-    updateStats(editor)
-  }, 
-  onSelectionUpdate: ({ editor }) => {
-    // 光标移动也触发补全逻辑 (关键新增)
-    handleAutoCompletion(editor)
+
+    if (transaction.docChanged && !isComposing.value && !isExternalContentUpdate) {
+      handleAutoCompletion(editor)
+    }
+
+    const markdown = (editor.storage as any).markdown.getMarkdown()
+    emit('update:modelValue', markdown)
+    store.updateContent(markdown)
+    debouncedSave()
     updateStats(editor)
   },
-}) 
+  onSelectionUpdate: ({ editor }) => {
+    updateStats(editor)
+  },
+})
 
-watch(() => props.modelValue, (newValue) => { 
-  if (editor.value) { 
-    const currentMarkdown = (editor.value.storage as any).markdown.getMarkdown() 
-    if (newValue !== currentMarkdown) { 
-      editor.value.commands.setContent(newValue) 
-    } 
-  } 
-}) 
+watch(() => props.modelValue, (newValue) => {
+  if (editor.value) {
+    const currentMarkdown = (editor.value.storage as any).markdown.getMarkdown()
+    if (newValue !== currentMarkdown) {
+      isApplyingExternalContent = true
+      clearGhostText(editor.value)
+      editor.value.commands.setContent(newValue)
+      queueMicrotask(() => {
+        isApplyingExternalContent = false
+      })
+    }
+  }
+})
 
 // Toolbar Actions
-const toggleBold = () => editor.value?.chain().focus().toggleBold().run() 
-const toggleItalic = () => editor.value?.chain().focus().toggleItalic().run() 
-const toggleStrike = () => editor.value?.chain().focus().toggleStrike().run() 
-const toggleCode = () => editor.value?.chain().focus().toggleCode().run() 
-const toggleH1 = () => editor.value?.chain().focus().toggleHeading({ level: 1 }).run() 
-const toggleH2 = () => editor.value?.chain().focus().toggleHeading({ level: 2 }).run() 
-const toggleH3 = () => editor.value?.chain().focus().toggleHeading({ level: 3 }).run() 
-const toggleBulletList = () => editor.value?.chain().focus().toggleBulletList().run() 
-const toggleOrderedList = () => editor.value?.chain().focus().toggleOrderedList().run() 
-const toggleTaskList = () => editor.value?.chain().focus().toggleTaskList().run() 
-const toggleBlockquote = () => editor.value?.chain().focus().toggleBlockquote().run() 
-const setHorizontalRule = () => editor.value?.chain().focus().setHorizontalRule().run() 
+const toggleBold = () => editor.value?.chain().focus().toggleBold().run()
+const toggleItalic = () => editor.value?.chain().focus().toggleItalic().run()
+const toggleStrike = () => editor.value?.chain().focus().toggleStrike().run()
+const toggleCode = () => editor.value?.chain().focus().toggleCode().run()
+const toggleH1 = () => editor.value?.chain().focus().toggleHeading({ level: 1 }).run()
+const toggleH2 = () => editor.value?.chain().focus().toggleHeading({ level: 2 }).run()
+const toggleH3 = () => editor.value?.chain().focus().toggleHeading({ level: 3 }).run()
+const toggleBulletList = () => editor.value?.chain().focus().toggleBulletList().run()
+const toggleOrderedList = () => editor.value?.chain().focus().toggleOrderedList().run()
+const toggleTaskList = () => editor.value?.chain().focus().toggleTaskList().run()
+const toggleBlockquote = () => editor.value?.chain().focus().toggleBlockquote().run()
+const setHorizontalRule = () => editor.value?.chain().focus().setHorizontalRule().run()
 
-onBeforeUnmount(() => editor.value?.destroy())
+onBeforeUnmount(() => {
+  invalidatePendingCompletion()
+  editor.value?.destroy()
+})
 </script>
 
 <template>
@@ -410,18 +486,16 @@ onBeforeUnmount(() => editor.value?.destroy())
 </template>
 
 <style>
-/* 全局样式覆盖 */
 .custom-scrollbar::-webkit-scrollbar { width: 6px; }
 .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #e5e5e5; border-radius: 3px; }
 .rotate-90 { transform: rotate(90deg); }
 
-/* Ghost Text (幽灵文本) 样式 */
 .ghost-text {
-  color: #adb5bd; /* 灰色 */
+  color: #adb5bd;
   font-style: italic;
   pointer-events: none;
 }
-/* Tab 提示 */
+
 .ghost-text::after {
   content: 'Tab';
   font-size: 0.7em;
