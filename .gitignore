@@ -38,3 +38,6 @@ models/
 .venv/
 
 .docs
+
+# Experiment caches
+experiments/.cache/
