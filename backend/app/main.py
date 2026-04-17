@@ -20,6 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.api import api_router
@@ -28,12 +29,15 @@ from app.core.config import settings
 from app.database import AsyncSessionLocal, engine
 from app.db_init import init_db
 from app.logger import InterceptHandler, ip_address_ctx, logger, request_id_ctx, user_id_ctx
-from app.services.agent_service import AgentService
-from app.services.llm_service import close_completion_http_client
+from app.services.completion.completion_service import close_completion_http_client
+from app.services.model_factory import get_chat_model
+from app.services.rag.rag_service import RagService
+from app.services.rag.rerank_service import get_reranker
 
 # =============================================================================
 # 生命周期管理 (Lifecycle)
 # =============================================================================
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,7 +70,6 @@ async def lifespan(app: FastAPI):
 
     try:
         await init_db()
-        print("数据库初始化完成，连接成功！", flush=True)
         logger.info("数据库连接成功", extra={"extra_data": {"event": "db_connected"}})
     except Exception:
         logger.exception("数据库初始化失败，后端停止启动")
@@ -74,9 +77,25 @@ async def lifespan(app: FastAPI):
 
     try:
         async with AsyncSessionLocal() as session:
-            await AgentService(session).ensure_bootstrap_index()
+            await RagService(session).ensure_bootstrap_index()
     except Exception:
         logger.exception("RAG 索引预热失败")
+
+    if settings.AI_WARMUP_ON_STARTUP:
+        try:
+            await get_chat_model().ainvoke('请只回复“就绪”。')
+            logger.info('聊天模型预热完成', extra={'extra_data': {'event': 'chat_warmup_complete', 'model': settings.CHAT_MODEL}})
+        except Exception:
+            logger.exception('聊天模型预热失败')
+
+        try:
+            await run_in_threadpool(get_reranker().warmup)
+            logger.info(
+                'Rerank 模型预热完成',
+                extra={'extra_data': {'event': 'rerank_warmup_complete', 'model': settings.RERANK_MODEL}},
+            )
+        except Exception:
+            logger.exception('Rerank 模型预热失败')
 
     yield
 
@@ -85,6 +104,7 @@ async def lifespan(app: FastAPI):
     await redis_manager.close()
     await engine.dispose()
     logger.info("数据库连接池已关闭", extra={"extra_data": {"event": "db_disconnected"}})
+
 
 # =============================================================================
 # 应用实例配置
@@ -107,6 +127,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -177,6 +198,7 @@ async def log_requests(request: Request, call_next):
         })
         raise e
 
+
 # =============================================================================
 # 路由注册
 # =============================================================================
@@ -186,6 +208,7 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 # =============================================================================
 # 根路由
 # =============================================================================
+
 
 @app.get("/")
 async def read_root():

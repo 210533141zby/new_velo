@@ -1,0 +1,18 @@
+[
+  {
+    "dataset": "DuRetrieval",
+    "corpus_size": 100001,
+    "query_pool_size": 2000,
+    "sampled_query_count": 1200,
+    "qrel_rows": 5934,
+    "avg_positive_docs_per_query": 4.945
+  },
+  {
+    "dataset": "T2Retrieval",
+    "corpus_size": 118605,
+    "query_pool_size": 22812,
+    "sampled_query_count": 1200,
+    "qrel_rows": 6169,
+    "avg_positive_docs_per_query": 5.140833333333333
+  }
+]

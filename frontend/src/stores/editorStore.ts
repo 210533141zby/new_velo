@@ -1,218 +1,318 @@
-/**
- * Editor Store (Pinia)
- * 
- * 描述:
- * 管理编辑器全局状态的核心 Store。负责文档的 CRUD、自动保存、
- * 以及 UI 状态 (侧边栏、Copilot) 的切换。
- * 
- * 核心设计:
- * 1. **Optimistic UI**: 大部分操作 (如更新内容) 先更新本地 State，再异步调用 API，
- *    提供流畅的用户体验。
- * 2. **Auto Save**: 使用 `useDebounceFn` 实现防抖自动保存 (2秒延迟)，
- *    避免频繁请求后端。
- * 3. **Single Source of Truth**: `currentDocument` 是当前编辑器渲染的唯一数据源。
- */
-
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import { useDebounceFn } from '@vueuse/core';
-import request from '@/api/request';
+import { createDocument, fetchDocument, listDocuments, removeDocument, updateDocument } from '@/api/documents';
+import type { DocumentRecord, SaveStatus } from '@/types/document';
+import { normalizeDocumentTitle } from '@/utils/document';
 
-export interface Document {
-  id: number;
-  title: string;
-  content: string;
-  created_at: string;
-  updated_at: string;
-  folder_id?: number | null;
+type CursorPosition = {
+  line: number;
+  col: number;
+};
+
+const AUTO_SAVE_DELAY_MS = 2000;
+
+function sanitizeDocument(document: DocumentRecord): DocumentRecord {
+  return {
+    ...document,
+    title: normalizeDocumentTitle(document.title),
+  };
 }
 
-export type SaveStatus = 'saved' | 'saving' | 'error' | 'unsaved';
-
 export const useEditorStore = defineStore('editor', () => {
-  // ==========================================================================
-  // State
-  // ==========================================================================
-  
-  // 所有文档列表 (侧边栏显示)
-  const documents = ref<Document[]>([]);
-  // 当前正在编辑的文档
-  const currentDocument = ref<Document | null>(null);
-  // 保存状态 (用于 UI 反馈: "已保存", "保存中"...)
+  const documents = ref<DocumentRecord[]>([]);
+  const currentDocument = ref<DocumentRecord | null>(null);
   const saveStatus = ref<SaveStatus>('saved');
-  // UI 开关状态
   const isSidebarOpen = ref(true);
   const isCopilotOpen = ref(false);
-  // 统计信息
   const wordCount = ref(0);
-  const cursorPosition = ref({ line: 1, col: 1 });
-  // AI 思考状态
+  const cursorPosition = ref<CursorPosition>({ line: 1, col: 1 });
   const isAiThinking = ref(false);
 
-  // ==========================================================================
-  // Actions
-  // ==========================================================================
+  let saveTimer: number | null = null;
+  const loadedDocumentIds = new Set<number>();
+  const loadingDocumentPromises = new Map<number, Promise<DocumentRecord | null>>();
 
-  /**
-   * 获取文档列表
-   * 
-   * Logic Flow:
-   * 1. 调用 GET /documents/ 接口。
-   * 2. 更新 `documents` 列表。
-   * 3. 如果当前没有选中任何文档且列表不为空，自动加载第一个文档。
-   */
+  function clearScheduledSave() {
+    if (saveTimer) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+  }
+
+  function queueSave() {
+    clearScheduledSave();
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void saveCurrentDocument();
+    }, AUTO_SAVE_DELAY_MS);
+  }
+
+  function syncDocumentInList(document: DocumentRecord) {
+    const normalized = sanitizeDocument(document);
+    const index = documents.value.findIndex((item) => item.id === normalized.id);
+
+    if (index === -1) {
+      documents.value.push(normalized);
+    } else {
+      documents.value[index] = normalized;
+    }
+
+    return normalized;
+  }
+
+  function markDocumentAsLoaded(documentId: number) {
+    loadedDocumentIds.add(documentId);
+  }
+
+  function selectDocument(document: DocumentRecord | null) {
+    clearScheduledSave();
+    currentDocument.value = document ? sanitizeDocument(document) : null;
+  }
+
+  async function fetchDocumentDetail(documentId: number, options?: { select?: boolean }) {
+    const shouldSelect = options?.select ?? false;
+    const cachedDocument = documents.value.find((document) => document.id === documentId);
+
+    if (cachedDocument && loadedDocumentIds.has(documentId)) {
+      if (shouldSelect) {
+        selectDocument(cachedDocument);
+        saveStatus.value = 'saved';
+      }
+      return cachedDocument;
+    }
+
+    const existingRequest = loadingDocumentPromises.get(documentId);
+    if (existingRequest) {
+      const document = await existingRequest;
+      if (shouldSelect && document) {
+        selectDocument(document);
+        saveStatus.value = 'saved';
+      }
+      return document;
+    }
+
+    const request = (async () => {
+      try {
+        const document = syncDocumentInList(await fetchDocument(documentId));
+        markDocumentAsLoaded(document.id);
+        return document;
+      } catch (error) {
+        console.error('Failed to load document', error);
+        return null;
+      } finally {
+        loadingDocumentPromises.delete(documentId);
+      }
+    })();
+
+    loadingDocumentPromises.set(documentId, request);
+    const document = await request;
+
+    if (shouldSelect && document) {
+      selectDocument(document);
+      saveStatus.value = 'saved';
+    }
+
+    return document;
+  }
+
+  async function prefetchDocumentDetails(documentIds: number[]) {
+    const pendingIds = documentIds.filter(
+      (documentId) => !loadedDocumentIds.has(documentId) && !loadingDocumentPromises.has(documentId),
+    );
+
+    if (!pendingIds.length) {
+      return;
+    }
+
+    await Promise.all(pendingIds.map((documentId) => fetchDocumentDetail(documentId)));
+  }
+
   async function fetchDocuments() {
     try {
-      const res = await request.get('/documents/');
-      documents.value = res as Document[];
-      if (!currentDocument.value && documents.value.length > 0) {
-        await loadDocument(documents.value[0].id);
-      }
-    } catch (e) {
-      console.error('Failed to fetch documents', e);
-    }
-  }
-
-  /**
-   * 创建新文档
-   * 
-   * Logic Flow:
-   * 1. 调用 POST /documents/ 接口创建空文档。
-   * 2. 将返回的新文档插入到 `documents` 列表头部。
-   * 3. 立即将其设为 `currentDocument`。
-   */
-  async function createDocument() {
-    try {
-      const newDoc = await request.post('/documents/', {
-        title: '',
-        content: '',
-      }) as Document;
-      // Force title to be empty if it comes back as Untitled or null (defensive fix)
-      // We check for various forms of 'Untitled' to be safe
-      const titleLower = (newDoc.title || '').toLowerCase().trim();
-      if (!newDoc.title || titleLower === 'untitled' || titleLower === 'untitled document') {
-        newDoc.title = '';
-      }
-      documents.value.unshift(newDoc);
-      currentDocument.value = newDoc;
-      saveStatus.value = 'saved';
-    } catch (e) {
-      console.error('Failed to create document', e);
-    }
-  }
-
-  /**
-   * 加载指定文档
-   */
-  async function loadDocument(id: number) {
-    try {
-      const doc = await request.get(`/documents/${id}`) as Document;
-      currentDocument.value = doc;
-      saveStatus.value = 'saved';
-    } catch (e) {
-      console.error('Failed to load document', e);
-    }
-  }
-
-  /**
-   * 删除文档
-   * 
-   * Logic Flow:
-   * 1. 调用 DELETE 接口。
-   * 2. 从本地 `documents` 列表中移除。
-   * 3. 如果删除的是当前正在编辑的文档:
-   *    - 尝试切换到列表中的第一个文档。
-   *    - 如果列表为空，置空 `currentDocument`。
-   */
-  async function deleteDocument(id: number) {
-    try {
-      await request.delete(`/documents/${id}`);
-      const idx = documents.value.findIndex(d => d.id === id);
-      if (idx !== -1) {
-        documents.value.splice(idx, 1);
-      }
-      
-      // If deleted current document, switch to another one
-      if (currentDocument.value?.id === id) {
-        if (documents.value.length > 0) {
-          await loadDocument(documents.value[0].id);
-        } else {
-          currentDocument.value = null;
+      const existingById = new Map(documents.value.map((document) => [document.id, document]));
+      const nextDocuments = (await listDocuments()).map((document) => {
+        const normalized = sanitizeDocument(document);
+        const cached = existingById.get(normalized.id);
+        if (cached && loadedDocumentIds.has(normalized.id)) {
+          return sanitizeDocument({
+            ...normalized,
+            content: cached.content,
+          });
         }
+        return normalized;
+      });
+      documents.value = nextDocuments;
+
+      if (!nextDocuments.length) {
+        selectDocument(null);
+        return;
       }
-    } catch (e) {
-      console.error('Failed to delete document', e);
+
+      if (!currentDocument.value) {
+        const initialDocument = await loadDocument(nextDocuments[0].id);
+        const initialId = initialDocument?.id ?? nextDocuments[0].id;
+        void prefetchDocumentDetails(nextDocuments.map((document) => document.id).filter((id) => id !== initialId));
+        return;
+      }
+
+      const currentSummary = nextDocuments.find((document) => document.id === currentDocument.value?.id);
+      if (!currentSummary) {
+        const fallbackDocument = await loadDocument(nextDocuments[0].id);
+        const fallbackId = fallbackDocument?.id ?? nextDocuments[0].id;
+        void prefetchDocumentDetails(nextDocuments.map((document) => document.id).filter((id) => id !== fallbackId));
+        return;
+      }
+
+      currentDocument.value = {
+        ...currentDocument.value,
+        ...currentSummary,
+      };
+
+      void prefetchDocumentDetails(
+        nextDocuments.map((document) => document.id).filter((id) => id !== currentDocument.value?.id),
+      );
+    } catch (error) {
+      console.error('Failed to fetch documents', error);
     }
   }
 
-  /**
-   * 保存当前文档 (核心)
-   * 
-   * Logic Flow:
-   * 1. 设置状态为 'saving'。
-   * 2. 调用 PUT 接口发送 title 和 content。
-   * 3. 更新本地 store 中的数据 (合并后端返回的可能更新的字段)。
-   * 4. 设置状态为 'saved'。
-   */
-  async function saveCurrentDocument() {
-    if (!currentDocument.value) return;
-    saveStatus.value = 'saving';
+  async function createNewDocument() {
     try {
-      const updatedDoc = await request.put(`/documents/${currentDocument.value.id}`, {
-        title: currentDocument.value.title,
-        content: currentDocument.value.content,
-      }) as Partial<Document>;
-      currentDocument.value = { ...currentDocument.value, ...updatedDoc };
-      
-      const idx = documents.value.findIndex(d => d.id === currentDocument.value?.id);
-      if (idx !== -1) documents.value[idx] = currentDocument.value;
-      
+      const newDocument = sanitizeDocument(
+        await createDocument({
+          title: '',
+          content: '',
+        }),
+      );
+
+      documents.value.unshift(newDocument);
+      markDocumentAsLoaded(newDocument.id);
+      selectDocument(newDocument);
       saveStatus.value = 'saved';
-    } catch (e) {
-      saveStatus.value = 'error';
-      console.error('Failed to save', e);
+      return newDocument;
+    } catch (error) {
+      console.error('Failed to create document', error);
+      return null;
     }
   }
 
-  /**
-   * 防抖自动保存
-   * 延迟 2000ms 执行 saveCurrentDocument
-   */
-  const debouncedSave = useDebounceFn(() => {
-    saveCurrentDocument();
-  }, 2000);
+  async function loadDocument(documentId: number) {
+    if (currentDocument.value?.id === documentId) {
+      return currentDocument.value;
+    }
 
-  /**
-   * 更新内容 (由编辑器调用)
-   * 
-   * Logic:
-   * 1. 立即更新内存中的 content。
-   * 2. 标记为 'unsaved'。
-   * 3. 触发防抖保存。
-   */
-  function updateContent(content: string) {
-    if (!currentDocument.value) return;
-    currentDocument.value.content = content;
-    saveStatus.value = 'unsaved'; // Set to unsaved immediately on change
-    debouncedSave();
+    return fetchDocumentDetail(documentId, { select: true });
   }
 
-  /**
-   * 更新标题
-   */
+  async function deleteDocument(documentId: number) {
+    try {
+      await removeDocument(documentId);
+      loadedDocumentIds.delete(documentId);
+      documents.value = documents.value.filter((document) => document.id !== documentId);
+
+      if (currentDocument.value?.id !== documentId) {
+        return;
+      }
+
+      if (!documents.value.length) {
+        selectDocument(null);
+        return;
+      }
+
+      await loadDocument(documents.value[0].id);
+    } catch (error) {
+      console.error('Failed to delete document', error);
+    }
+  }
+
+  async function saveCurrentDocument() {
+    if (!currentDocument.value) {
+      return;
+    }
+
+    clearScheduledSave();
+
+    const snapshot = {
+      ...currentDocument.value,
+    };
+
+    saveStatus.value = 'saving';
+
+    try {
+      const response = await updateDocument(snapshot.id, {
+        title: snapshot.title,
+        content: snapshot.content,
+      });
+
+      const persistedDocument = sanitizeDocument({
+        ...snapshot,
+        ...response,
+        title: response.title ?? snapshot.title,
+        content: response.content ?? snapshot.content,
+      });
+
+      if (currentDocument.value?.id === snapshot.id) {
+        const hasPendingLocalChanges =
+          currentDocument.value.title !== snapshot.title || currentDocument.value.content !== snapshot.content;
+
+        const nextCurrentDocument = hasPendingLocalChanges
+          ? sanitizeDocument({
+              ...currentDocument.value,
+              updated_at: persistedDocument.updated_at,
+              created_at: persistedDocument.created_at,
+              folder_id: persistedDocument.folder_id,
+            })
+          : persistedDocument;
+
+        currentDocument.value = nextCurrentDocument;
+        syncDocumentInList(nextCurrentDocument);
+        markDocumentAsLoaded(nextCurrentDocument.id);
+        saveStatus.value = hasPendingLocalChanges ? 'unsaved' : 'saved';
+
+        if (hasPendingLocalChanges) {
+          queueSave();
+        }
+
+        return;
+      }
+
+      syncDocumentInList(persistedDocument);
+      markDocumentAsLoaded(persistedDocument.id);
+    } catch (error) {
+      if (currentDocument.value?.id === snapshot.id) {
+        saveStatus.value = 'error';
+      }
+      console.error('Failed to save document', error);
+    }
+  }
+
+  function updateContent(content: string) {
+    if (!currentDocument.value || currentDocument.value.content === content) {
+      return;
+    }
+
+    currentDocument.value.content = content;
+    saveStatus.value = 'unsaved';
+    queueSave();
+  }
+
   function updateTitle(title: string) {
-    if (!currentDocument.value) return;
+    if (!currentDocument.value || currentDocument.value.title === title) {
+      return;
+    }
+
     currentDocument.value.title = title;
     saveStatus.value = 'unsaved';
-    debouncedSave();
+    queueSave();
   }
 
-  /**
-   * 更新统计信息
-   */
   function updateStats(count: number, line: number, col: number) {
     wordCount.value = count;
     cursorPosition.value = { line, col };
+  }
+
+  function setAiThinking(nextValue: boolean) {
+    isAiThinking.value = nextValue;
   }
 
   function toggleSidebar() {
@@ -233,14 +333,15 @@ export const useEditorStore = defineStore('editor', () => {
     cursorPosition,
     isAiThinking,
     fetchDocuments,
-    createDocument,
+    createDocument: createNewDocument,
     loadDocument,
     saveCurrentDocument,
     deleteDocument,
     updateContent,
     updateTitle,
     updateStats,
+    setAiThinking,
     toggleSidebar,
-    toggleCopilot
+    toggleCopilot,
   };
 });

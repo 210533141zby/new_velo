@@ -36,3 +36,5 @@ models/
 .lingma/
 .lingma
 .venv/
+
+.docs

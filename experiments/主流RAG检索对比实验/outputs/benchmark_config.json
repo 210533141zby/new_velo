@@ -1,0 +1,35 @@
+{
+  "random_seed": 20260415,
+  "datasets": [
+    {
+      "name": "du",
+      "label": "DuRetrieval",
+      "repo_corpus": "C-MTEB/DuRetrieval",
+      "repo_qrels": "C-MTEB/DuRetrieval-qrels",
+      "corpus_file": "data/corpus-00000-of-00001-19b9e924cb33e4d5.parquet",
+      "queries_file": "data/queries-00000-of-00001-7c7edb40be6b560c.parquet",
+      "qrels_file": "data/dev-00000-of-00001-d3c385852a7c0c9d.parquet",
+      "sample_queries": 1200
+    },
+    {
+      "name": "t2",
+      "label": "T2Retrieval",
+      "repo_corpus": "C-MTEB/T2Retrieval",
+      "repo_qrels": "C-MTEB/T2Retrieval-qrels",
+      "corpus_file": "data/corpus-00000-of-00001-8afe7b7a7eca49e3.parquet",
+      "queries_file": "data/queries-00000-of-00001-930bf3b805a80dd9.parquet",
+      "qrels_file": "data/dev-00000-of-00001-92ed0416056ff7e1.parquet",
+      "sample_queries": 1200
+    }
+  ],
+  "embedding_model": "nomic-embed-text:latest",
+  "embedding_fallback_model": "nomic-embed-text:latest",
+  "rerank_model": "BAAI/bge-reranker-v2-m3",
+  "sample_queries": null,
+  "retrieval_top_k": 50,
+  "rerank_top_k_mainstream": 20,
+  "rerank_top_k_ours": 30,
+  "final_top_k": 10,
+  "rrf_k": 60,
+  "bootstrap_samples": 1000
+}

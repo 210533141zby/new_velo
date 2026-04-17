@@ -1,128 +1,125 @@
 <script setup lang="ts">
-import { useEditorStore } from '../../stores/editorStore';
-import { Plus, Settings, User, File, Trash2 } from 'lucide-vue-next';
 import { onMounted, ref } from 'vue';
+import { File, Plus, Settings, Trash2, User } from 'lucide-vue-next';
 import ConfirmModal from '../modals/ConfirmModal.vue';
+import { useEditorStore } from '@/stores/editorStore';
+import { formatDocumentUpdatedAt, getDocumentDisplayTitle } from '@/utils/document';
 
 const store = useEditorStore();
 const isDeleteModalVisible = ref(false);
 const fileToDeleteId = ref<number | null>(null);
 
-onMounted(() => {
-  store.fetchDocuments();
-});
+function closeDeleteModal() {
+  isDeleteModalVisible.value = false;
+  fileToDeleteId.value = null;
+}
 
-const createNewFile = () => {
-  store.createDocument();
-};
+async function createNewFile() {
+  await store.createDocument();
+}
 
-const confirmDelete = (id: number, event: Event) => {
+function openDocument(documentId: number) {
+  void store.loadDocument(documentId);
+}
+
+function confirmDelete(documentId: number, event: Event) {
   event.stopPropagation();
-  fileToDeleteId.value = id;
+  fileToDeleteId.value = documentId;
   isDeleteModalVisible.value = true;
-};
+}
 
-const handleDelete = () => {
-  if (fileToDeleteId.value !== null) {
-    store.deleteDocument(fileToDeleteId.value);
-    isDeleteModalVisible.value = false;
-    fileToDeleteId.value = null;
+async function handleDelete() {
+  if (fileToDeleteId.value === null) {
+    return;
   }
-};
+
+  await store.deleteDocument(fileToDeleteId.value);
+  closeDeleteModal();
+}
+
+onMounted(() => {
+  void store.fetchDocuments();
+});
 </script>
 
 <template>
-  <div class="h-full flex flex-col bg-[#F2F3F5] border-r border-stone-200 font-['Nunito']">
-    <!-- Header -->
-    <div class="h-14 flex items-center justify-between px-5 border-b border-stone-200 bg-[#F2F3F5]">
+  <div class="flex h-full flex-col border-r border-stone-200 bg-[#F2F3F5] font-['Nunito']">
+    <div class="flex h-14 items-center justify-between border-b border-stone-200 bg-[#F2F3F5] px-5">
       <div class="flex items-center space-x-3">
-        <div class="w-6 h-6 bg-[#D06847] rounded-lg flex items-center justify-center shadow-sm">
-          <span class="text-white text-xs font-serif font-bold italic">V</span>
+        <div class="flex h-6 w-6 items-center justify-center rounded-lg bg-[#D06847] shadow-sm">
+          <span class="text-xs font-bold italic text-white">V</span>
         </div>
-        <span class="text-stone-900 font-serif font-bold tracking-tight text-lg">Velo</span>
+        <span class="font-serif text-lg font-bold tracking-tight text-stone-900">Velo</span>
       </div>
-      <button 
+      <button
         @click="createNewFile"
-        class="p-1.5 hover:bg-stone-200 rounded-lg text-stone-500 hover:text-[#D06847] transition-all duration-200"
+        class="rounded-lg p-1.5 text-stone-500 transition-all duration-200 hover:bg-stone-200 hover:text-[#D06847]"
         title="Create New File"
       >
-        <Plus class="w-5 h-5" />
+        <Plus class="h-5 w-5" />
       </button>
     </div>
 
-    <!-- File List -->
-    <div class="flex-1 overflow-y-auto py-4 px-3 bg-[#F2F3F5]">
-      <div class="px-2 mb-3 text-xs font-bold text-stone-900 uppercase tracking-wider font-mono flex items-center justify-between">
+    <div class="flex-1 overflow-y-auto bg-[#F2F3F5] px-3 py-4">
+      <div class="mb-3 flex items-center justify-between px-2 font-mono text-xs font-bold uppercase tracking-wider text-stone-900">
         <span>Workspace</span>
-        <span class="text-[10px] bg-stone-200 text-stone-900 px-1.5 py-0.5 rounded border border-stone-300 font-medium">Local</span>
+        <span class="rounded border border-stone-300 bg-stone-200 px-1.5 py-0.5 text-[10px] font-medium text-stone-900">Local</span>
       </div>
       <div class="space-y-1">
-        <div 
-          v-for="doc in store.documents" 
-          :key="doc.id"
-          @click="store.loadDocument(doc.id)"
-          class="group flex items-center px-3 py-2.5 rounded-lg cursor-pointer text-sm transition-all duration-200 relative border border-transparent"
-          :class="store.currentDocument?.id === doc.id ? 'bg-white text-[#D06847] font-bold shadow-sm' : 'text-stone-900 font-medium hover:bg-stone-200 hover:text-black'"
+        <div
+          v-for="document in store.documents"
+          :key="document.id"
+          class="group relative flex cursor-pointer items-center rounded-lg border border-transparent px-3 py-2.5 text-sm transition-all duration-200"
+          :class="store.currentDocument?.id === document.id ? 'bg-white font-bold text-[#D06847] shadow-sm' : 'font-medium text-stone-900 hover:bg-stone-200 hover:text-black'"
+          @click="openDocument(document.id)"
         >
-          <!-- Indicator -->
-          <div class="absolute left-0 top-2 bottom-2 w-1 bg-[#D06847] rounded-r transition-opacity"
-            :class="store.currentDocument?.id === doc.id ? 'opacity-100' : 'opacity-0'"></div>
+          <div
+            class="absolute bottom-2 left-0 top-2 w-1 rounded-r bg-[#D06847] transition-opacity"
+            :class="store.currentDocument?.id === document.id ? 'opacity-100' : 'opacity-0'"
+          ></div>
 
-          <File 
-            class="w-4 h-4 mr-3 transition-colors flex-shrink-0" 
-            :class="store.currentDocument?.id === doc.id ? 'text-[#D06847]' : 'text-stone-500 group-hover:text-stone-700'" 
+          <File
+            class="mr-3 h-4 w-4 flex-shrink-0 transition-colors"
+            :class="store.currentDocument?.id === document.id ? 'text-[#D06847]' : 'text-stone-500 group-hover:text-stone-700'"
           />
-          <div class="flex flex-col flex-1 min-w-0">
-             <span class="truncate leading-tight">{{ doc.title || 'Untitled' }}</span>
-             <span class="text-[10px] text-stone-400 truncate mt-0.5 group-hover:text-stone-500 transition-colors">
-               {{ 
-                 new Date(doc.updated_at ? doc.updated_at.replace(' ', 'T') + 'Z' : Date.now()).toLocaleString('zh-CN', { 
-                   timeZone: 'Asia/Shanghai', 
-                   hour12: false,
-                   year: 'numeric',
-                   month: '2-digit',
-                   day: '2-digit',
-                   hour: '2-digit',
-                   minute: '2-digit',
-                   second: '2-digit'
-                 }) 
-               }}
-             </span>
+
+          <div class="flex min-w-0 flex-1 flex-col">
+            <span class="truncate leading-tight">{{ getDocumentDisplayTitle(document.title) }}</span>
+            <span class="mt-0.5 truncate text-[10px] text-stone-400 transition-colors group-hover:text-stone-500">
+              {{ formatDocumentUpdatedAt(document.updated_at) }}
+            </span>
           </div>
 
-          <!-- Delete Button (Hover) -->
-          <button 
-            @click="(e) => confirmDelete(doc.id, e)"
-            class="opacity-0 group-hover:opacity-100 p-1.5 text-stone-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-all transform hover:scale-105"
+          <button
+            @click="(event) => confirmDelete(document.id, event)"
+            class="rounded-md p-1.5 text-stone-400 opacity-0 transition-all hover:scale-105 hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
             title="Delete File"
           >
-            <Trash2 class="w-3.5 h-3.5" />
+            <Trash2 class="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
     </div>
 
-    <!-- Modals -->
-      <ConfirmModal 
-        v-model:visible="isDeleteModalVisible"
-        message="确定要删除这个文档吗？此操作无法撤销。"
-        @confirm="handleDelete"
-      />
+    <ConfirmModal
+      v-model:visible="isDeleteModalVisible"
+      message="确定要删除这个文档吗？此操作无法撤销。"
+      @confirm="handleDelete"
+    />
 
-    <!-- Footer -->
-    <div class="p-4 border-t border-stone-200 bg-[#F5F5F5]">
+    <div class="border-t border-stone-200 bg-[#F5F5F5] p-4">
       <div class="flex items-center justify-between">
         <div class="flex items-center space-x-3">
-          <div class="w-8 h-8 rounded-full bg-stone-200 flex items-center justify-center overflow-hidden border border-stone-300">
-             <User class="w-5 h-5 text-stone-500" />
+          <div class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-stone-300 bg-stone-200">
+            <User class="h-5 w-5 text-stone-500" />
           </div>
           <div class="flex flex-col">
             <span class="text-xs font-bold text-stone-700">User</span>
             <span class="text-[10px] text-stone-400">Pro Plan</span>
           </div>
         </div>
-        <button class="p-2 hover:bg-stone-200 rounded-lg text-stone-400 hover:text-stone-600 transition-colors">
-          <Settings class="w-5 h-5" />
+        <button class="rounded-lg p-2 text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-600">
+          <Settings class="h-5 w-5" />
         </button>
       </div>
     </div>

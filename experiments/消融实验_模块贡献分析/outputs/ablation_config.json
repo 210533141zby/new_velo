@@ -1,0 +1,87 @@
+{
+  "random_seed": 20260415,
+  "dataset": {
+    "name": "du",
+    "label": "DuRetrieval",
+    "repo_corpus": "C-MTEB/DuRetrieval",
+    "repo_qrels": "C-MTEB/DuRetrieval-qrels",
+    "corpus_file": "data/corpus-00000-of-00001-19b9e924cb33e4d5.parquet",
+    "queries_file": "data/queries-00000-of-00001-7c7edb40be6b560c.parquet",
+    "qrels_file": "data/dev-00000-of-00001-d3c385852a7c0c9d.parquet",
+    "sample_queries": 1200
+  },
+  "sample_queries": 1200,
+  "embedding_model": "nomic-embed-text:latest",
+  "cache_root": "/root/Velo/experiments/.cache/public_benchmarks",
+  "doc_embedding_cache": "du_nomic-embed-text-latest_n100001_74f55fba656f_doc_embeddings.npy",
+  "query_embedding_cache": "du_nomic-embed-text-latest_n1200_aa792f9230ad_query_embeddings.npy",
+  "retrieval_top_k": 50,
+  "mainstream_b_candidate_k": 20,
+  "full_candidate_k": 30,
+  "final_top_k": 10,
+  "fixed_lexical_weight": 0.36,
+  "bootstrap_samples": 1000,
+  "ablation_protocol": "leave-one-out around the full pipeline, with mainstream B as external reference",
+  "ablation_configs": [
+    {
+      "key": "mainstream_b",
+      "label": "主流方案 B（RRF + Rerank Top20）",
+      "score_mode": "rrf_only",
+      "use_coverage": false,
+      "use_identifier_reward": false,
+      "use_identifier_penalty": false,
+      "candidate_strategy": "mainstream_b",
+      "candidate_k": 20
+    },
+    {
+      "key": "w_o_adaptive",
+      "label": "去掉自适应权重（固定 lexical/dense 权重）",
+      "score_mode": "fixed",
+      "use_coverage": true,
+      "use_identifier_reward": true,
+      "use_identifier_penalty": true,
+      "candidate_strategy": "mixed",
+      "candidate_k": 30
+    },
+    {
+      "key": "w_o_coverage",
+      "label": "去掉覆盖率奖励",
+      "score_mode": "adaptive",
+      "use_coverage": false,
+      "use_identifier_reward": true,
+      "use_identifier_penalty": true,
+      "candidate_strategy": "mixed",
+      "candidate_k": 30
+    },
+    {
+      "key": "w_o_identifier",
+      "label": "去掉标识符约束",
+      "score_mode": "adaptive",
+      "use_coverage": true,
+      "use_identifier_reward": false,
+      "use_identifier_penalty": false,
+      "candidate_strategy": "mixed",
+      "candidate_k": 30
+    },
+    {
+      "key": "w_o_mixed_pool",
+      "label": "去掉混合候选池",
+      "score_mode": "adaptive",
+      "use_coverage": true,
+      "use_identifier_reward": true,
+      "use_identifier_penalty": true,
+      "candidate_strategy": "topk_scored",
+      "candidate_k": 30
+    },
+    {
+      "key": "full",
+      "label": "完整方案",
+      "score_mode": "adaptive",
+      "use_coverage": true,
+      "use_identifier_reward": true,
+      "use_identifier_penalty": true,
+      "candidate_strategy": "mixed",
+      "candidate_k": 30
+    }
+  ]
+}

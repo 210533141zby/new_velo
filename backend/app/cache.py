@@ -73,7 +73,6 @@ class CacheManager:
             self.redis = client
             self.use_redis = True
             logger.info("✅ Redis 缓存: 连接成功")
-            print("Redis 已连接 ")
             
         except (redis.ConnectionError, redis.TimeoutError, Exception) as e:
             self.use_redis = False
@@ -82,7 +81,6 @@ class CacheManager:
                  await client.aclose()
             self.redis = None
             logger.warning(f"⚠️ Redis 不可用: {str(e)}. 切换到内存缓存模式")
-            print(f"Redis 连接失败: {e}. 使用内存缓存 (降级模式)")
 
     async def close(self):
         """

@@ -1,25 +1,42 @@
 <script setup lang="ts">
-import { useEditorStore } from './stores/editorStore';
-import FileTree from './components/Sidebar/FileTree.vue';
-import TiptapEditor from './components/Editor/TiptapEditor.vue';
+import { computed, onMounted, onUnmounted } from 'vue';
+import {
+  Bot,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  PanelLeft,
+  Save,
+  Share,
+  Sparkles,
+} from 'lucide-vue-next';
 import ChatPanel from './components/Copilot/ChatPanel.vue';
+import TiptapEditor from './components/Editor/TiptapEditor.vue';
 import StatusBar from './components/Layout/StatusBar.vue';
-import { PanelLeft, Sparkles, Save, Share, Loader2, Check, Bot, ChevronRight, ChevronLeft } from 'lucide-vue-next';
-import { onMounted, onUnmounted } from 'vue';
+import FileTree from './components/Sidebar/FileTree.vue';
+import { useEditorStore } from './stores/editorStore';
 
 const store = useEditorStore();
 
-const handleKeydown = (e: KeyboardEvent) => {
-  // Toggle Copilot with Ctrl + \
-  if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
-    e.preventDefault();
+const hasCurrentDocument = computed(() => Boolean(store.currentDocument));
+const currentTitle = computed({
+  get: () => store.currentDocument?.title ?? '',
+  set: (value: string) => {
+    store.updateTitle(value);
+  },
+});
+
+function handleKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key === '\\') {
+    event.preventDefault();
     store.toggleCopilot();
   }
-  // Close Copilot with Esc
-  if (e.key === 'Escape' && store.isCopilotOpen) {
+
+  if (event.key === 'Escape' && store.isCopilotOpen) {
     store.toggleCopilot();
   }
-};
+}
 
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown);
@@ -31,112 +48,97 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-full bg-[#F5F5F5] overflow-hidden text-stone-900 font-sans">
-    <!-- Sidebar -->
-    <aside 
-      class="flex-shrink-0 transition-all duration-300 ease-in-out border-r border-stone-200 bg-[#F5F5F5]"
-      :class="store.isSidebarOpen ? 'w-[240px]' : 'w-0 border-none overflow-hidden opacity-0'"
+  <div class="flex h-screen w-full overflow-hidden bg-[#F5F5F5] font-sans text-stone-900">
+    <aside
+      class="flex-shrink-0 border-r border-stone-200 bg-[#F5F5F5] transition-all duration-300 ease-in-out"
+      :class="store.isSidebarOpen ? 'w-[240px]' : 'w-0 overflow-hidden border-none opacity-0'"
     >
       <FileTree />
     </aside>
 
-    <!-- Main Content -->
-    <main class="flex-1 flex flex-col min-w-0 bg-[#F5F5F5] relative z-0">
-      <!-- Workbench Header -->
-      <div class="h-14 flex items-center justify-between border-b border-stone-200 px-6 bg-[#F5F5F5] z-20">
-        <div class="flex items-center h-full space-x-4">
-          <!-- Sidebar Toggle -->
-          <button 
+    <main class="relative z-0 flex min-w-0 flex-1 flex-col bg-[#F5F5F5]">
+      <div class="z-20 flex h-14 items-center justify-between border-b border-stone-200 bg-[#F5F5F5] px-6">
+        <div class="flex h-full items-center space-x-4">
+          <button
             @click="store.toggleSidebar"
-            class="h-9 w-9 flex items-center justify-center rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-50 transition-colors"
+            class="flex h-9 w-9 items-center justify-center rounded-lg text-stone-500 transition-colors hover:bg-stone-50 hover:text-stone-900"
             title="Toggle Sidebar"
           >
-            <PanelLeft class="w-5 h-5" />
+            <PanelLeft class="h-5 w-5" />
           </button>
-          
-          <!-- Breadcrumbs / Title -->
-          <div class="flex items-center text-sm text-stone-500 space-x-2 font-medium">
-            <div class="hidden sm:flex items-center space-x-2 hover:text-stone-900 cursor-pointer transition-colors">
-              <Sparkles class="w-4 h-4 text-[#D06847]" />
-              <span class="font-serif font-bold text-stone-900">Velo</span>
+
+          <div class="flex items-center space-x-2 text-sm font-medium text-stone-500">
+            <div class="hidden cursor-pointer items-center space-x-2 transition-colors hover:text-stone-900 sm:flex">
+              <Sparkles class="h-4 w-4 text-[#D06847]" />
+              <span class="font-serif text-stone-900">Velo</span>
             </div>
-            <span class="text-stone-300 hidden sm:inline-block">/</span>
-            <!-- Editable Title Input -->
-            <input 
-              v-if="store.currentDocument"
-              v-model="store.currentDocument.title"
-              @input="store.updateTitle(store.currentDocument.title)"
-              class="font-serif font-bold text-stone-900 text-lg bg-transparent border-b-2 border-transparent hover:border-stone-200 focus:border-[#D06847] focus:outline-none px-1 py-0.5 transition-all w-[300px] placeholder-stone-300"
+            <span class="hidden text-stone-300 sm:inline-block">/</span>
+            <input
+              v-if="hasCurrentDocument"
+              v-model="currentTitle"
+              class="w-[300px] border-b-2 border-transparent bg-transparent px-1 py-0.5 font-serif text-lg font-bold text-stone-900 outline-none transition-all placeholder:text-stone-300 hover:border-stone-200 focus:border-[#D06847]"
               placeholder="Enter document title..."
             />
-            <span v-else class="font-serif font-bold text-stone-500 text-lg px-1">No Document Selected</span>
+            <span v-else class="px-1 font-serif text-lg text-stone-500">No Document Selected</span>
           </div>
         </div>
-        
-        <!-- Right Actions -->
+
         <div class="flex items-center space-x-3">
-          <!-- Save Button -->
-           <button 
+          <button
             @click="store.saveCurrentDocument"
-            class="flex items-center justify-center w-8 h-8 rounded-lg transition-all hover:bg-stone-100"
-            :class="{
-              'cursor-wait': store.saveStatus === 'saving',
-            }"
+            class="flex h-8 w-8 items-center justify-center rounded-lg transition-all hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50"
+            :class="{ 'cursor-wait': store.saveStatus === 'saving' }"
+            :disabled="!hasCurrentDocument || store.saveStatus === 'saving'"
             :title="store.saveStatus === 'saving' ? 'Saving...' : (store.saveStatus === 'saved' ? 'Saved' : 'Save')"
           >
-            <Loader2 v-if="store.saveStatus === 'saving'" class="w-4 h-4 animate-spin text-stone-400" />
-            <Check v-else-if="store.saveStatus === 'saved'" class="w-4 h-4 text-green-600" />
-            <Save v-else class="w-4 h-4 text-stone-400" />
+            <Loader2 v-if="store.saveStatus === 'saving'" class="h-4 w-4 animate-spin text-stone-400" />
+            <Check v-else-if="store.saveStatus === 'saved'" class="h-4 w-4 text-green-600" />
+            <Save v-else class="h-4 w-4 text-stone-400" />
           </button>
 
-          <!-- Export/Share -->
-           <button 
-            class="p-2 rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-50 transition-colors border border-transparent hover:border-stone-200"
+          <button
+            class="rounded-lg border border-transparent p-2 text-stone-500 transition-colors hover:border-stone-200 hover:bg-stone-50 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-50"
             title="Export PDF"
+            :disabled="!hasCurrentDocument"
           >
-            <Share class="w-5 h-5" />
+            <Share class="h-5 w-5" />
           </button>
 
-          <div class="w-px h-5 bg-stone-200 mx-1"></div>
+          <div class="mx-1 h-5 w-px bg-stone-200"></div>
 
-          <!-- AI Toggle -->
-          <button 
+          <button
             @click="store.toggleCopilot"
-            class="flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors border"
-            :class="store.isCopilotOpen ? 'bg-[#D06847]/10 text-[#D06847] border-[#D06847]' : 'text-stone-500 border-transparent hover:bg-stone-50 hover:text-stone-900'"
+            class="flex items-center space-x-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors"
+            :class="store.isCopilotOpen ? 'border-[#D06847] bg-[#D06847]/10 text-[#D06847]' : 'border-transparent text-stone-500 hover:bg-stone-50 hover:text-stone-900'"
           >
-            <Bot class="w-4 h-4" />
+            <Bot class="h-4 w-4" />
             <span>AI</span>
           </button>
         </div>
       </div>
 
-      <!-- Editor Area -->
-      <div class="flex-1 relative overflow-hidden bg-white">
-        <TiptapEditor 
-          :model-value="store.currentDocument?.content || ''" 
+      <div class="relative flex-1 overflow-hidden bg-white">
+        <TiptapEditor
+          :model-value="store.currentDocument?.content || ''"
           @update:model-value="store.updateContent"
         />
       </div>
 
-      <!-- Status Bar -->
       <StatusBar />
 
-      <!-- Floating AI Toggle Handle -->
-      <button 
+      <button
         @click="store.toggleCopilot"
-        class="absolute top-1/2 -translate-y-1/2 right-0 z-50 w-5 h-12 flex items-center justify-center bg-white border border-stone-200 shadow-md cursor-pointer text-stone-400 hover:text-[#D06847] transition-all duration-300 rounded-l-lg border-r-0"
-        title="Toggle AI Assistant (Ctrl + \)"
+        class="absolute right-0 top-1/2 z-50 flex h-12 w-5 -translate-y-1/2 items-center justify-center rounded-l-lg border border-r-0 border-stone-200 bg-white text-stone-400 shadow-md transition-all duration-300 hover:text-[#D06847]"
+        title="Toggle AI Assistant (Ctrl + \\)"
       >
-        <ChevronRight v-if="store.isCopilotOpen" class="w-3 h-3" />
-        <ChevronLeft v-else class="w-3 h-3" />
+        <ChevronRight v-if="store.isCopilotOpen" class="h-3 w-3" />
+        <ChevronLeft v-else class="h-3 w-3" />
       </button>
     </main>
 
-    <!-- Copilot Panel -->
-    <aside 
-      class="flex-shrink-0 transition-all duration-300 ease-in-out border-l border-border-line bg-surface"
-      :class="store.isCopilotOpen ? 'w-[350px]' : 'w-0 border-none overflow-hidden opacity-0'"
+    <aside
+      class="flex-shrink-0 border-l border-border-line bg-surface transition-all duration-300 ease-in-out"
+      :class="store.isCopilotOpen ? 'w-[350px]' : 'w-0 overflow-hidden border-none opacity-0'"
     >
       <ChatPanel />
     </aside>

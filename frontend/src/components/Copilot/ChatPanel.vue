@@ -1,100 +1,95 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue';
-import request from '@/api/request';
-import { useEditorStore } from '../../stores/editorStore';
-import { X, Send, Bot, User as UserIcon, Database, Sparkles, ArrowUpLeft } from 'lucide-vue-next';
+import { ChevronLeft, Database, Send, Sparkles, User as UserIcon } from 'lucide-vue-next';
+import { sendChatMessage } from '@/api/chat';
+import { useEditorStore } from '@/stores/editorStore';
+import type { ChatMessage, ChatSource } from '@/types/chat';
 
 const store = useEditorStore();
 const inputValue = ref('');
-const isRAGMode = ref(false);
 const isSending = ref(false);
 const messagesContainer = ref<HTMLElement | null>(null);
-
-type ChatSource = {
-  title: string;
-  doc_id?: number | null;
-};
-
-type ChatMessage = {
-  id: number;
-  role: 'user' | 'assistant';
-  content: string;
-  sources?: ChatSource[];
-  isLoading?: boolean;
-  mode?: 'rag' | 'chat';
-};
-
 const messages = ref<ChatMessage[]>([
-  { id: 1, role: 'assistant', content: '你好！我是你的知识副驾。', mode: 'chat' }
+  { id: 1, role: 'assistant', content: '你好！我是你的知识副驾。', mode: 'rag' },
 ]);
 
-const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   nextTick(() => {
     const container = messagesContainer.value;
     if (container) {
       container.scrollTo({ top: container.scrollHeight, behavior });
     }
   });
-};
+}
 
-const updateAssistantMessage = (messageId: number, payload: Partial<ChatMessage>) => {
-  const index = messages.value.findIndex(msg => msg.id === messageId);
-  if (index === -1) return;
+function updateAssistantMessage(messageId: number, payload: Partial<ChatMessage>) {
+  const index = messages.value.findIndex((message) => message.id === messageId);
+  if (index === -1) {
+    return;
+  }
 
   messages.value[index] = {
     ...messages.value[index],
     ...payload,
   };
-};
+}
 
-const openSource = async (source: ChatSource) => {
-  if (!source.doc_id) return;
-  try {
-    await store.loadDocument(source.doc_id);
-  } catch (error) {
-    console.error('Failed to open source document', error);
+async function openSource(source: ChatSource) {
+  if (!source.doc_id) {
+    return;
   }
-};
 
-const sendMessage = async () => {
+  await store.loadDocument(source.doc_id);
+}
+
+function getSourceRank(source: ChatSource, index: number) {
+  return source.rank ?? index + 1;
+}
+
+function getSourceConfidence(source: ChatSource) {
+  return typeof source.confidence === 'number' ? `${source.confidence}%` : '未标注';
+}
+
+async function sendMessage() {
   const trimmed = inputValue.value.trim();
-  if (!trimmed || isSending.value) return;
+  if (!trimmed || isSending.value) {
+    return;
+  }
 
-  const mode: 'rag' | 'chat' = isRAGMode.value ? 'rag' : 'chat';
+  const mode = 'rag';
   const now = Date.now();
-  const userMessage: ChatMessage = {
-    id: now,
-    role: 'user',
-    content: trimmed,
-    mode,
-  };
   const loadingMessageId = now + 1;
 
-  messages.value.push(userMessage, {
-    id: loadingMessageId,
-    role: 'assistant',
-    content: '',
-    isLoading: true,
-    mode,
-    sources: [],
-  });
+  messages.value.push(
+    {
+      id: now,
+      role: 'user',
+      content: trimmed,
+      mode,
+    },
+    {
+      id: loadingMessageId,
+      role: 'assistant',
+      content: '',
+      isLoading: true,
+      mode,
+      sources: [],
+    },
+  );
 
   inputValue.value = '';
   isSending.value = true;
+  store.setAiThinking(true);
   scrollToBottom('auto');
 
   try {
-    const response = await request.post('/agent/chat', {
-      messages: [{ role: 'user', content: trimmed }],
-      use_rag: isRAGMode.value,
-    }) as { response: string; sources?: ChatSource[] };
-
+    const response = await sendChatMessage(trimmed);
     updateAssistantMessage(loadingMessageId, {
       content: response.response,
       sources: response.sources ?? [],
       isLoading: false,
     });
-  } catch (_error) {
+  } catch {
     updateAssistantMessage(loadingMessageId, {
       content: '抱歉，我现在没法正常回复，请稍后再试。',
       sources: [],
@@ -102,62 +97,68 @@ const sendMessage = async () => {
     });
   } finally {
     isSending.value = false;
+    store.setAiThinking(false);
     scrollToBottom();
   }
-};
+}
 </script>
 
 <template>
-  <div class="h-full flex flex-col border-l border-stone-200 bg-gradient-to-b from-[#fbf8f2] via-[#f6f1e8] to-[#f2ebe0] shadow-xl">
-    <div class="flex h-16 items-center justify-between border-b border-[#e5dccf] bg-[#fffaf2]/95 px-4 backdrop-blur">
-      <div class="flex items-center gap-3">
-        <div class="flex h-9 w-9 items-center justify-center rounded-full border border-[#e4d6c1] bg-white text-[#c56a46] shadow-sm">
-          <Sparkles class="h-4 w-4" />
-        </div>
-        <div>
-          <div class="text-sm font-semibold tracking-[0.12em] text-stone-700">Atlas</div>
-        </div>
-      </div>
-
+  <div class="flex h-full flex-col border-l border-[#eadfce] bg-gradient-to-b from-[#fcfaf6] via-[#f7f3ec] to-[#f3ede4] shadow-[0_10px_34px_rgba(128,102,70,0.08)]">
+    <div class="flex h-14 items-center gap-3 border-b border-[#ece2d3] bg-[#fffaf4]/92 px-4 backdrop-blur">
       <button
         @click="store.toggleCopilot"
-        class="rounded-md p-1 text-stone-400 transition-colors hover:bg-[#d06847]/10 hover:text-[#d06847]"
+        class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[#eadfce] bg-white/88 text-stone-400 shadow-[0_4px_14px_rgba(126,96,61,0.08)] transition-colors hover:border-[#dcc4a6] hover:bg-[#fff7ee] hover:text-[#c06a49]"
       >
-        <X class="h-5 w-5" />
+        <ChevronLeft class="h-3.5 w-3.5" />
       </button>
+
+      <div class="h-5 w-px flex-shrink-0 bg-[#e9dfd2]"></div>
+
+      <div class="flex min-w-0 items-center gap-2.5">
+        <div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[#eadfce] bg-white/92 text-[#c47a58] shadow-[0_4px_14px_rgba(126,96,61,0.08)]">
+          <Sparkles class="h-3.5 w-3.5" />
+        </div>
+        <div class="min-w-0">
+          <div class="text-[13px] font-semibold tracking-[0.08em] text-stone-700">Atlas</div>
+        </div>
+      </div>
     </div>
 
-    <div ref="messagesContainer" class="flex-1 space-y-5 overflow-y-auto px-4 py-5">
+    <div ref="messagesContainer" class="flex-1 space-y-4 overflow-y-auto px-3.5 py-4">
       <div
-        v-for="msg in messages"
-        :key="msg.id"
-        class="flex items-start gap-3"
-        :class="msg.role === 'user' ? 'flex-row-reverse' : ''"
+        v-for="message in messages"
+        :key="message.id"
+        class="flex items-start gap-2.5"
+        :class="message.role === 'user' ? 'flex-row-reverse' : ''"
       >
         <div
-          class="mt-1 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border shadow-sm"
-          :class="msg.role === 'assistant'
-            ? 'border-[#dfd2bf] bg-white text-[#c56a46]'
-            : 'border-stone-300 bg-stone-200 text-stone-700'"
+          class="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border shadow-[0_4px_14px_rgba(126,96,61,0.07)]"
+          :class="message.role === 'assistant' ? 'border-[#e7ddcf] bg-white/92 text-[#c47a58]' : 'border-stone-300/80 bg-stone-100 text-stone-600'"
         >
-          <Database v-if="msg.role === 'assistant' && msg.mode === 'rag'" class="h-4 w-4" />
-          <Bot v-else-if="msg.role === 'assistant'" class="h-4 w-4" />
-          <UserIcon v-else class="h-4 w-4" />
+          <Database v-if="message.role === 'assistant'" class="h-3.5 w-3.5" />
+          <UserIcon v-else class="h-3.5 w-3.5" />
         </div>
 
-        <div class="max-w-[88%] space-y-2">
-          <div v-if="msg.role === 'user'" class="rounded-2xl rounded-tr-sm border border-[#d06847] bg-[#d06847] px-4 py-3 text-sm leading-6 text-white shadow-sm">
-            {{ msg.content }}
+        <div
+          class="space-y-2"
+          :class="message.role === 'assistant' ? 'min-w-0 flex-1 pr-2' : 'max-w-[84%]'"
+        >
+          <div
+            v-if="message.role === 'user'"
+            class="rounded-[20px] rounded-tr-md border border-[#d97a58] bg-[#d06847] px-4 py-3 text-[13px] leading-6 text-white shadow-[0_8px_20px_rgba(181,92,59,0.16)]"
+          >
+            {{ message.content }}
           </div>
 
           <template v-else>
-            <div class="overflow-hidden rounded-2xl rounded-tl-sm border border-[#e1d7ca] bg-[#fffdf8] shadow-[0_12px_30px_rgba(125,92,52,0.06)]">
-              <div class="border-b border-[#eee3d3] bg-[#f8f1e6] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
-                {{ msg.mode === 'rag' ? '知识库回答' : '模型回答' }}
+            <div class="overflow-hidden rounded-[20px] rounded-tl-md border border-[#e7ddd0] bg-[#fffdf9] shadow-[0_8px_24px_rgba(125,92,52,0.05)]">
+              <div class="border-b border-[#f0e7da] bg-[#faf5ee] px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                知识库回答
               </div>
 
-              <div v-if="msg.isLoading" class="flex items-center justify-between gap-3 px-4 py-4 text-sm text-stone-600">
-                <div>{{ msg.mode === 'rag' ? '正在检索资料并组织答案' : '正在生成回答' }}</div>
+              <div v-if="message.isLoading" class="flex items-center justify-between gap-3 px-4 py-3.5 text-[13px] text-stone-600">
+                <div>正在检索资料并组织答案</div>
                 <div class="loading-dots" aria-label="正在加载">
                   <span></span>
                   <span></span>
@@ -165,34 +166,50 @@ const sendMessage = async () => {
                 </div>
               </div>
 
-              <div v-else class="px-4 py-4">
-                <div class="assistant-body whitespace-pre-wrap text-[14px] leading-7 text-stone-700">
-                  {{ msg.content }}
+              <div v-else class="px-4 py-3.5">
+                <div class="assistant-body whitespace-pre-wrap text-[13px] leading-[1.9] text-stone-700">
+                  {{ message.content }}
                 </div>
               </div>
             </div>
 
             <div
-              v-if="!msg.isLoading && msg.sources?.length"
-              class="overflow-hidden rounded-2xl border border-[#ddd2c2] bg-white/80 shadow-[0_8px_24px_rgba(125,92,52,0.05)]"
+              v-if="!message.isLoading && message.sources?.length"
+              class="overflow-hidden rounded-[18px] border border-[#e6ddcf] bg-white/72 shadow-[0_6px_18px_rgba(125,92,52,0.04)]"
             >
-              <div class="flex items-center gap-2 border-b border-[#eee4d6] bg-[#f8f3ec] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
-                <Database class="h-3.5 w-3.5 text-[#c56a46]" />
+              <div class="flex items-center gap-2 border-b border-[#efe6d8] bg-[#faf5ee] px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+                <Database class="h-3 w-3 text-[#c47a58]" />
                 <span>参考引用</span>
               </div>
 
-              <div class="space-y-2 px-4 py-4">
+              <div class="space-y-2 px-4 py-3.5">
                 <button
-                  v-for="(source, index) in msg.sources"
-                  :key="`${msg.id}-${index}`"
+                  v-for="(source, index) in message.sources"
+                  :key="`${message.id}-${index}`"
                   type="button"
-                  class="flex w-full items-center justify-between rounded-xl border border-[#ece3d6] bg-[#fffaf3] px-3 py-3 text-left transition-colors"
-                  :class="source.doc_id ? 'hover:border-[#d8b28f] hover:bg-[#fff4e8]' : ''"
+                  class="w-full rounded-2xl border border-[#eee5d8] bg-[#fffaf4] px-3 py-2.5 text-left transition-colors"
+                  :class="source.doc_id ? 'hover:border-[#dec8ae] hover:bg-[#fff6ea]' : ''"
                   :disabled="!source.doc_id"
                   @click="source.doc_id && openSource(source)"
                 >
-                  <span class="text-sm font-semibold text-stone-800">{{ source.title }}</span>
-                  <ArrowUpLeft v-if="source.doc_id" class="h-4 w-4 text-[#b76543]" />
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="flex-shrink-0 rounded-full border border-[#ece1d2] bg-white px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.04em] text-stone-500"
+                    >
+                      #{{ getSourceRank(source, index) }}
+                    </span>
+                    <span
+                      class="min-w-0 flex-1 truncate text-[12px] font-medium leading-5 text-stone-700"
+                      :title="source.title"
+                    >
+                      {{ source.title }}
+                    </span>
+                    <span
+                      class="flex-shrink-0 rounded-full bg-[#f7efe3] px-1.5 py-0.5 text-[9px] font-semibold text-stone-500"
+                    >
+                      {{ getSourceConfidence(source) }}
+                    </span>
+                  </div>
                 </button>
               </div>
             </div>
@@ -201,19 +218,19 @@ const sendMessage = async () => {
       </div>
     </div>
 
-    <div class="border-t border-[#e5dccf] bg-[#fffaf2] px-4 py-4">
-      <div class="relative overflow-hidden rounded-2xl border border-[#e4d7c6] bg-white shadow-sm">
+    <div class="border-t border-[#ece2d3] bg-[#fffaf4] px-3.5 py-3.5">
+      <div class="relative overflow-hidden rounded-[22px] border border-[#e9dece] bg-white/92 shadow-[0_6px_18px_rgba(125,92,52,0.05)]">
         <textarea
           v-model="inputValue"
           @keydown.enter.prevent="sendMessage"
-          :placeholder="isRAGMode ? '向知识库提问...' : '输入指令或问题...'"
-          class="w-full resize-none bg-transparent p-4 pr-12 text-sm leading-6 text-stone-800 outline-none placeholder:text-stone-400"
+          placeholder="向知识库提问..."
+          class="w-full resize-none bg-transparent p-4 pr-11 text-[13px] leading-6 text-stone-700 outline-none placeholder:text-stone-400"
           rows="3"
           :disabled="isSending"
         ></textarea>
         <button
           @click="sendMessage"
-          class="absolute bottom-3 right-3 rounded-full bg-[#d06847] p-2 text-white shadow-sm transition-colors hover:bg-[#b55739] disabled:cursor-not-allowed disabled:opacity-50"
+          class="absolute bottom-3 right-3 rounded-full bg-[#cf7a57] p-1.5 text-white shadow-[0_6px_16px_rgba(181,92,59,0.18)] transition-colors hover:bg-[#bb6848] disabled:cursor-not-allowed disabled:opacity-50"
           :disabled="!inputValue.trim() || isSending"
         >
           <Send class="h-3.5 w-3.5" />
@@ -221,31 +238,12 @@ const sendMessage = async () => {
       </div>
 
       <div class="mt-3 flex items-center justify-between px-1">
-        <div class="flex items-center gap-2">
-          <button
-            @click="isRAGMode = !isRAGMode"
-            class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
-            :class="isRAGMode ? 'bg-[#d06847]' : 'bg-stone-300'"
-            title="点击切换知识库模式"
-          >
-            <span class="sr-only">使用知识库</span>
-            <span
-              aria-hidden="true"
-              class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"
-              :class="isRAGMode ? 'translate-x-4' : 'translate-x-0'"
-            ></span>
-          </button>
-          <span
-            class="cursor-pointer select-none text-xs font-semibold tracking-[0.14em]"
-            :class="isRAGMode ? 'text-[#d06847]' : 'text-stone-500'"
-            @click="isRAGMode = !isRAGMode"
-          >
-            {{ isRAGMode ? '知识库模式' : '通用模式' }}
-          </span>
+        <div class="rounded-full border border-[#ebdcc8] bg-[#fff6ec] px-3 py-1 text-[10px] font-semibold tracking-[0.1em] text-[#be7352]">
+          知识库问答
         </div>
 
-        <span class="text-xs text-stone-400">
-          {{ isSending ? (isRAGMode ? '知识库检索中...' : '模型生成中...') : (isRAGMode ? '已启用本地检索' : '通用模型') }}
+        <span class="text-[11px] text-stone-400">
+          {{ isSending ? '知识库检索中...' : '已启用本地检索' }}
         </span>
       </div>
     </div>
