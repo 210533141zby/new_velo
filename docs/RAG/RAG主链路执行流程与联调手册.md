@@ -68,8 +68,8 @@
 
 1. 向量召回只走一条 `normalized_query`。
 2. BM25 吃的是 `keyword_query`。
-3. 检索前只保留 query 去噪和关键词视图，不再存在 `planner / rewrite / HyDE` 分支。
-4. 生成后不再存在 `reflection` 审核层，稳定性依赖模式路由和优雅降级。
+3. 检索前只保留 query 去噪和关键词视图，不再叠额外历史增强分支。
+4. 生成后不再存在额外审核层，稳定性依赖模式路由和优雅降级。
 
 ## 4. 后端执行顺序展开
 
@@ -131,7 +131,7 @@
 1. 向量召回输入 `intent.normalized_query`
 2. BM25 输入 `intent.keyword_query`
 3. 默认不做多路向量循环
-4. 检索前不再存在 planner / rewrite / HyDE 增强分支
+4. 检索前不再存在额外历史增强分支
 
 ### 4.4 hybrid 粗排阶段
 
@@ -226,7 +226,7 @@ Judge 当前只做三件事：
 2. `STRUCTURED -> GENERATIVE`
 3. `GENERATIVE -> NO_CONTEXT`
 
-当前生成后没有 Reflection 审核层。
+当前生成后没有额外审核层。
 
 ### 4.10 前端展示阶段
 
@@ -336,6 +336,11 @@ PY
 9. `韩国`
 10. `新加坡的档案馆`
 11. `新加坡的风景`
+12. `陈鹤汀`
+13. `沈见川`
+14. `韩启明与档案馆的关系是什么`
+15. `沈见川和陈鹤汀有什么共同点`
+16. `文章中提到了哪些人物？他们分别与档案馆有什么关系？`
 
 这组问题分别对应：
 
@@ -350,6 +355,11 @@ PY
 9. 单实体无上下文边界
 10. 属性型对象错配边界
 11. 主体词命中但主题对象错配边界
+12. 短实体命中回归
+13. 第二个短实体命中回归
+14. 人物与机构关系问法回归
+15. 多实体共同点综合回归
+16. 多人物列举与关系综合回归
 
 ## 8. 当前最该看的日志
 
@@ -387,7 +397,7 @@ PY
 1. 文档里旧的 `rag_qa_no_context`
 2. `rag_query_plan_failed`
 3. `rag_document_judge_reject`
-4. `rag_answer_reflection_reject`
+4. 旧的生成后审核拒绝事件
 
 这些不是当前运行时代码里的主事件，不能再按旧文档去查。
 
@@ -407,13 +417,14 @@ PY
 10. `reason`
 11. `source_doc_ids`
 12. `doc_id`
-13. `base_relevance`
-14. `topic_match`
-15. `judge_latency_ms`
-16. `flags`
-17. `usable`
-18. `final_score`
-19. `judge_status`
+13. `adaptive_score`
+14. `base_relevance`
+15. `topic_match`
+16. `judge_latency_ms`
+17. `flags`
+18. `usable`
+19. `final_score`
+20. `judge_status`
 
 ## 9. 常见问题的联调顺序
 
@@ -615,15 +626,15 @@ PY
 2. 操作范围
    `docs/RAG/README.md`、`RAG与Rerank方案说明.md`、`RAG主链路执行流程与联调手册.md`、`RAG主链路优化与问题闭环报告.md`、`RAG答辩讲稿与技术拆解.md`。
 3. 问题现象
-   文档里仍在把 `AgentService`、`universal defense`、`rewrite / HyDE` 默认主路径、`reflection` 默认启用写成当前运行时事实。
+   文档里仍在把 `AgentService`、`universal defense`、历史增强模块默认主路径、额外审核层默认启用写成当前运行时事实。
 4. 分析
    代码已经收口到 `RagService + QueryIntentBuilder + UnifiedEvidenceScorer + AnswerModeRouter`，但文档没有同步，导致答辩口径、联调说明和真实运行态脱节。
 5. 解决方案
    以当前代码为准，统一重写文档口径，明确：
    - 当前主入口是 `RagService`
    - 当前主控制面是 `QueryIntentBuilder -> UnifiedEvidenceScorer -> AnswerModeRouter`
-   - `rewrite / HyDE / planner` 默认未挂接
-   - `reflection` 当前默认未挂接
+   - 历史增强模块当前默认未挂接
+   - 额外审核层当前默认未挂接
    - `LLM Judge` 为选择性启用
 6. 验证结果
    本次按代码逐文件核对完成文档同步；本次同步中未重新跑 probe 和单测。
@@ -658,7 +669,7 @@ PY
 2. 操作范围
    `docs/RAG/RAG主链路执行流程与联调手册.md`
 3. 问题现象
-   旧文档中仍然写着 `rag_qa_no_context`、`rag_query_plan_failed`、`rag_document_judge_reject`、`rag_answer_reflection_reject` 这类当前主链路并不依赖的旧事件。
+   旧文档中仍然写着 `rag_qa_no_context`、`rag_query_plan_failed`、`rag_document_judge_reject`、旧的生成后审核拒绝事件 这类当前主链路并不依赖的旧事件。
 4. 分析
    这些事件属于旧阶段残留说法，当前代码里主要事件已经变成 `rag_intent_built`、`rag_evidence_assessed`、`rag_pipeline_routed`、`rag_generator_fallback` 等结构化日志。
 5. 解决方案
@@ -675,18 +686,18 @@ PY
 2. 操作范围
    RAG 文档全集，尤其是执行手册和答辩稿。
 3. 问题现象
-   容易把保留配置的 `rewrite / HyDE / reflection` 讲成当前在线主路径能力。
+   容易把早期残留口径里的历史增强模块和额外审核层讲成当前在线主路径能力。
 4. 分析
-   这种混写会直接影响联调判断和答辩表达，尤其会让人误以为当前每个 query 都在走 rewrite、HyDE 或 reflection。
+   这种混写会直接影响联调判断和答辩表达，尤其会让人误以为当前每个 query 都会先走额外增强再走额外审核。
 5. 解决方案
    明确标注：
-   - `rewrite / HyDE / planner` 当前默认未挂接
-   - `reflection` 当前默认未挂接
+   - 历史增强模块当前默认未挂接
+   - 额外审核层当前默认未挂接
    - `LLM Judge` 当前只在 `STRICT` 高风险 query 上启用
 6. 验证结果
    本次文档已经统一改口径；本次未重新跑探针。
 7. 未解决风险
-   如果后续重新接回 reflection 或 rewrite，必须第一时间在这里补一条新的运行日志。
+   如果后续重新接回额外增强或额外审核逻辑，必须第一时间在这里补一条新的运行日志。
 
 ### [2026-04-17] 修复多实体综合问题的过度拒答
 
@@ -734,20 +745,20 @@ PY
 7. 未解决风险
    backend 的长期稳定性仍取决于本地依赖和模型服务是否持续可用；如果后续出现回答失败，需要继续联动检查 `ollama`、向量库和日志事件。
 
-### [2026-04-17] 从代码库彻底移除 Query Rewrite、HyDE 和 Reflection
+### [2026-04-17] 从代码库彻底移除历史增强与额外审核逻辑
 
 1. 目标
-   删除 Query Rewrite、HyDE、Reflection 三项旧能力，避免继续保留无效配置、无效 Prompt 和过期文档口径。
+   删除历史增强与额外审核逻辑，避免继续保留无效配置、无效 Prompt 和过期文档口径。
 2. 操作范围
-   `backend/app/core/config.py`、`backend/app/services/rag/prompt_templates.py`、`docs/RAG/README.md`、`docs/RAG/RAG与Rerank方案说明.md`、`docs/RAG/RAG主链路优化与问题闭环报告.md`、`docs/RAG/RAG主链路执行流程与联调手册.md`、`docs/RAG/RAG答辩讲稿与技术拆解.md`、`docs/RAG/LLM查询重写与HyDE接入说明.md`
+   `backend/app/core/config.py`、`backend/app/services/rag/prompt_templates.py`、`docs/RAG/README.md`、`docs/RAG/RAG与Rerank方案说明.md`、`docs/RAG/RAG主链路优化与问题闭环报告.md`、`docs/RAG/RAG主链路执行流程与联调手册.md`、`docs/RAG/RAG答辩讲稿与技术拆解.md`、对应的历史说明文档
 3. 问题现象
-   当前主链路早就不再依赖这三项能力，但代码里还残留旧配置项和 Reflection Prompt，文档里也仍有“保留但未挂接”的描述，容易让联调、答辩和后续维护误以为这些能力还在系统里。
+   当前主链路早就不再依赖这些历史逻辑，但代码里还残留旧配置项和旧 Prompt，文档里也仍有“保留但未挂接”的描述，容易让联调、答辩和后续维护误以为这些能力还在系统里。
 4. 分析
    这类“代码不调用但配置和文档还在”的状态最容易制造误解，也会让配置面持续膨胀。既然当前架构已经稳定收口到 `QueryIntentBuilder -> UnifiedEvidenceScorer -> AnswerModeRouter`，就不应该再保留这类历史能力的运行时痕迹。
 5. 解决方案
-   - 删除 `build_answer_reflection_prompt()` 和相关过期说明
-   - 删除 Query Rewrite、HyDE、Reflection 相关配置项，以及已无实际用途的 `RAG_SEARCH_LIMIT`、`RAG_MIN_FINAL_SCORE`、`RAG_KEEP_SCORE_RATIO`
-   - 删除 `docs/RAG/LLM查询重写与HyDE接入说明.md`
+   - 删除旧的生成后审核 Prompt 和相关过期说明
+   - 删除历史增强与额外审核相关配置项，以及已无实际用途的 `RAG_SEARCH_LIMIT`、`RAG_MIN_FINAL_SCORE`、`RAG_KEEP_SCORE_RATIO`
+   - 删除对应的历史说明文档
    - 将 RAG 文档口径统一改成“已从代码库移除”，不再写成“保留但未启用”
    - 删除后重新启动 backend 和 frontend，确保运行态与文档一致
 6. 验证结果
@@ -757,6 +768,119 @@ PY
    - 重启后 backend `http://127.0.0.1:8000/health` 返回 `{"status":"ok"}`
 7. 未解决风险
    旧运行日志文件里仍可能保留历史栈信息或旧事件名，但这些只是历史记录，不代表当前代码库仍然包含对应能力。
+
+### [2026-04-20] 入库前增加语义锚点注入，修正顺带提及误召回
+
+1. 目标
+   降低“文档只顺带提到实体，却被误当成核心主题召回”的概率，尤其是地点名、机构名和人物名的泛匹配问题。
+2. 操作范围
+   `backend/app/services/rag/vector_index_service.py`、索引链路、本文档工作日志同步。
+3. 问题现象
+   之前部分 chunk 虽然包含“新加坡”“档案馆”之类词，但正文核心并不在讨论用户真正想问的对象，检索时容易被顺带提及误召回。
+4. 分析
+   只靠正文 chunk 本身，有时缺少足够强的主题锚点。标题主题、首段主题和局部句子的语义焦点不总是一致，导致 dense 和词法召回都可能把“提到了这个词”的 chunk 拉进候选池。
+5. 解决方案
+   - 在 `vector_index_service.py` 新增 `_extract_core_entities(title, first_paragraph)`
+   - 用 `jieba.posseg` 提取标题和首段中的名词，过滤 `文档 / 资料 / 介绍 / 内容 / 背景 / 历史 / 概况 / 测试` 等停用词
+   - 取权重最高的 1 到 3 个核心实体，生成 `【核心主题：实体1、实体2】`
+   - 在 `index_document_chunks()` 中把该前缀注入每个 chunk 的 `page_content` 头部，不改 metadata
+6. 验证结果
+   重新索引后可在相似召回结果中直接看到 `【核心主题：...】` 前缀；该修正已进入当前代码主链路。
+7. 未解决风险
+   如果标题和首段本身就写得非常抽象，轻量实体抽取的收益会下降；当前也依赖 `jieba.posseg` 可用，缺依赖时会自动跳过注入。
+
+### [2026-04-20] 补修多信息点与多实体综合问法
+
+1. 目标
+   修复“共同点”“文章中提到了哪些人物”“分别与某对象有什么关系”“承担什么角色”“捐出了哪些材料”这类问题的拒答和回答不完整问题。
+2. 操作范围
+   `backend/app/services/rag/query_intent_builder.py`、`evidence_scorer.py`、`answer_generators.py`、`prompt_templates.py`、本文档工作日志同步。
+3. 问题现象
+   这类问题之前常见两种失败：
+   - 直接被拒答，因为单 chunk 证据不足以覆盖多个信息点
+   - 没有拒答，但答案只覆盖一个人物、一个角色或一条材料信息
+4. 分析
+   这不是单纯的“模型生成能力不够”，而是当前管线原本偏向原子事实抽取。多信息问法往往需要跨段综合、列举多个要点，继续按单句抽取或短答约束容易丢信息。
+5. 解决方案
+   - `RELATION_MARKERS` 增加 `共同点`
+   - `RELATION + 共同点` 下调到更宽松的防御画像，减少过度拒答
+   - `MIN_TOPIC_ALIGNMENT` 改为：`STRICT 0.20 / MODERATE 0.08 / LOOSE 0.05`
+   - `MIN_FINAL_SCORE` 改为：`STRICT 0.58 / MODERATE 0.45 / LOOSE 0.46`
+   - 无 Judge 场景下的 `direct_evidence` 判定放宽到 `topic_alignment >= 0.35 and (title_alignment >= 0.20 or base_relevance >= 0.52)`
+   - Judge Prompt 增加“比较两个实体 / 共同点 / 多人物关系”判定规则
+   - `answer_generators.py` 中新增多信息标记词，并让 `StructuredGenerator` 对这类问题扩大上下文、读取 `full_content`
+   - `ExtractiveGenerator` 允许 top-2 句拼接，减少列举型答案被单句截断
+6. 验证结果
+   相关 probe 已覆盖：
+   - `陈鹤汀`
+   - `沈见川`
+   - `韩启明与档案馆的关系是什么`
+   - `沈见川和陈鹤汀有什么共同点`
+   - `文章中提到了哪些人物？他们分别与档案馆有什么关系？`
+   当前这些问题已被纳入本手册第 7 节的常规回归列表。
+7. 未解决风险
+   多信息问题现在更依赖全文级综合和模型列举能力，如果文档跨度再变大，后续仍需要继续观察答案完整性与引用可解释性。
+
+### [2026-04-20] Prompt 去领域特调，保留通用边界防御
+
+1. 目标
+   去掉对《雾潮镇档案馆》语料过于贴身的提示词和历史段落加权词，确保当前链路在公共基准和其他知识库上也成立。
+2. 操作范围
+   `backend/app/services/rag/prompt_templates.py`、`backend/app/services/rag/answer_generators.py`
+3. 问题现象
+   旧版本 Prompt 和历史段落打分里出现过于具体的领域词，例如“馆长年龄”“档案馆”“渔业”“捕鱼”等，这些词在当前语料有效，但不应该作为通用系统行为长期固化。
+4. 分析
+   这类特调虽然能短期提高本地样本表现，但会污染答辩口径，也会让 RGB 这类公共基准对比失真。
+5. 解决方案
+   - `build_general_rag_prompt()` 删除领域化示例，保留“概括类问题先回答核心对象”和“顺带提及必须拒答”两条通用规则
+   - `build_structured_rag_prompt()` 改成按问题需要输出适当长度，明确多信息问题要完整列出
+   - `_history_paragraph_score()` 改成通用年份与历史词：`\d{4}年`、`最早 / 建于 / 创立 / 成立 / 起步 / 发展 / 后来 / 直到 / 最初 / 早期`
+6. 验证结果
+   当前 Prompt 已不再写死《雾潮镇档案馆》特征词；这一步也为后续 RGB 对比评测提供了更干净的基线。
+7. 未解决风险
+   去特调后，本地语料上的个别历史类问题可能失去一部分场景红利，因此后续只能继续靠通用检索、评分和路由逻辑提升，而不能再回退到特定语料关键词硬编码。
+
+### [2026-04-20] 搭建“本地知识库 + RGB”双数据集对比评测链路
+
+1. 目标
+   把自研 RAG 与 LlamaIndex 的对比从“本地知识库体感”提升到“本地数据集 + RGB 公共基准”的双视角评测，并输出可直接展示的图表。
+2. 操作范围
+   `llamaindex_rag_eval/compare_rag_systems.py`、`llamaindex_rag_eval/outputs/`、`llamaindex_rag_eval/data/rgb/outputs/`
+3. 问题现象
+   之前的对比主要依赖本地知识库，容易被追问“是不是只对你自己的文档有效”，缺少公共基准证明。
+4. 分析
+   本地知识库评测可以证明系统贴近真实业务，但不能单独证明通用性；RGB 可以补足这一点。两者一起看，才能把“本地适配效果”和“跨数据集泛化能力”区分开。
+5. 解决方案
+   - 用 `compare_rag_systems.py` 固定对齐参数，对比自研 RAG 与 LlamaIndex
+   - 输出本地知识库对比结果：`rag_comparison_summary.json/.csv/.svg`
+   - 输出 RGB 对比结果：`rgb_rag_comparison_summary.json/.csv/.svg`
+   - 再汇总为双数据集总图：`dataset_comparison_summary.json/.csv/.svg`
+6. 验证结果
+   当前已保存的一组结果为：
+   - 本地知识库：自研 RAG `faithfulness 1.0`、`answer_relevancy 0.8112`、`accuracy 0.3`；LlamaIndex `faithfulness 0.85`、`answer_relevancy 0.8545`、`accuracy 0.2`
+   - RGB：自研 RAG `faithfulness 0.92`、`answer_relevancy 0.8113`、`context_precision 0.93`、`accuracy 0.8033`；LlamaIndex `faithfulness 0.8517`、`answer_relevancy 0.6429`、`context_precision 0.7333`、`accuracy 0.59`
+   - 时延权衡：RGB 上自研 RAG `P95 3597.06ms`，LlamaIndex `P95 1412.95ms`
+7. 未解决风险
+   这组结果是当前一次运行的快照，不代表永久稳定上界；只要继续调整阈值、路由或评测样本，就必须重新生成对应图表与 CSV。
+
+### [2026-04-20] 同步补写 RAG 近期变动到技术文档和工作日志
+
+1. 目标
+   把已经落地的 RAG 主链路改动同步写回技术文档和工作日志，避免文档继续滞后于代码。
+2. 操作范围
+   `docs/RAG/RAG主链路优化与问题闭环报告.md`、`docs/RAG/RAG主链路执行流程与联调手册.md`、`docs/RAG/RAG答辩讲稿与技术拆解.md`
+3. 问题现象
+   文档里还保留了“全文评分”“旧阈值”“旧路由”和未及时补写的近期变动，导致代码、日志和答辩口径没有完全对齐。
+4. 分析
+   这种错位会直接影响联调、复盘和答辩表达。尤其是近期做过数据流修正、语义锚点注入、多信息问法补修和双数据集评测，如果不写回文档，后续就很难追踪“为什么现在代码是这样”。
+5. 解决方案
+   - 在技术文档中补写 chunk / full_content 真实分工、语义锚点注入、Prompt 去特调和双数据集评测
+   - 在执行手册中追加 2026-04-20 的工作日志条目
+   - 在答辩稿中把评分阈值、路由规则、生成器行为和近期调整同步到当前实现
+6. 验证结果
+   本次为文档同步，不涉及新的代码行为变更；已按当前代码状态完成文档更新。
+7. 未解决风险
+   只要后续再改 `evidence_scorer.py`、`answer_mode_router.py`、`answer_generators.py` 或评测脚本，就必须继续实时追加日志，不能再攒到下一轮统一补写。
 
 ## 12. 当前目录里的文档分工
 

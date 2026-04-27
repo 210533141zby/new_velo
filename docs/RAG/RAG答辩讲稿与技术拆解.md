@@ -12,8 +12,8 @@
 
 1. `AgentService`
 2. `universal defense` 作为当前主控制面
-3. `Query Rewrite / HyDE` 仍然是当前系统组成部分
-4. `Reflection` 仍然挂在生成后
+3. 历史检索增强模块仍然是当前系统组成部分
+4. 额外生成后审核层仍然挂在生成后
 
 ## 2. 当前最推荐的开场说法
 
@@ -50,11 +50,11 @@
 
 ### 5.2 再讲索引层
 
-“当前索引层不是整篇文档直接入库，而是先按 Markdown 标题做结构切分，再做递归分块。具体参数是 `chunk_size=1000`、`chunk_overlap=200`。这样做是为了兼顾两件事：既让 embedding 保留局部语义单元，又不过度切碎上下文。每个 chunk 写入向量库时都会保留 `source` 和 `doc_id`，后面检索命中 chunk 之后，还能恢复到完整文档做评分和生成。” 
+“当前索引层不是整篇文档直接入库，而是先按 Markdown 标题做结构切分，再做递归分块。具体参数是 `chunk_size=1000`、`chunk_overlap=200`。这样做是为了兼顾两件事：既让 embedding 保留局部语义单元，又不过度切碎上下文。每个 chunk 写入向量库时都会保留 `source` 和 `doc_id`，并且在入库前会注入一个轻量的 `【核心主题：...】` 语义锚点。后面检索命中 chunk 之后，评分和抽取继续用 chunk 文本，只有 `SUMMARY / OVERVIEW` 这类需要文档级综合的问题才会切到 `full_content` 做生成。” 
 
 ### 5.3 再讲查询意图构建
 
-“query 进入系统之后，不会直接原封不动拿去搜，而是先经过 `QueryIntentBuilder`。这一步做的事很克制，但很关键。它先做口语前缀和句尾语气词清洗，然后构造 `normalized_query` 和 `keyword_query` 两个视图。接着用规则把 query 判成 `LOOKUP`、`FACTOID`、`RELATION`、`SUMMARY`、`OVERVIEW`、`REASON`、`LOCATION` 这些意图类型。不同意图会映射到不同的 `retrieval_depth`、`defense_profile` 和 `evidence_requirement`。例如，`LOOKUP` 默认召回深度是 6，`FACTOID` 是 8，`RELATION` 和 `SUMMARY` 是 12，`OVERVIEW` 是 14；如果 query 含编号，或者 token 很长，还会继续上调，但最多不超过 16。`LOOKUP`、`RELATION` 和属性型问题会被映射成 `STRICT` 防御画像，`SUMMARY` 和 `OVERVIEW` 是 `LOOSE`，其他一般是 `MODERATE`。这一层的价值在于，后面检索、Judge 和回答模式都不需要再各自重新理解 query。” 
+“query 进入系统之后，不会直接原封不动拿去搜，而是先经过 `QueryIntentBuilder`。这一步做的事很克制，但很关键。它先做口语前缀和句尾语气词清洗，然后构造 `normalized_query` 和 `keyword_query` 两个视图。接着用规则把 query 判成 `LOOKUP`、`FACTOID`、`RELATION`、`SUMMARY`、`OVERVIEW`、`REASON`、`LOCATION` 这些意图类型。不同意图会映射到不同的 `retrieval_depth`、`defense_profile` 和 `evidence_requirement`。例如，`LOOKUP` 默认召回深度是 6，`FACTOID` 是 8，`RELATION` 和 `SUMMARY` 是 12，`OVERVIEW` 是 14；如果 query 含编号，或者 token 很长，还会继续上调，但最多不超过 16。大体上 `LOOKUP`、`RELATION` 和属性型问题会被映射成 `STRICT` 防御画像，`SUMMARY` 和 `OVERVIEW` 是 `LOOSE`，其他一般是 `MODERATE`；但 `RELATION + 共同点` 是一个特例，它会直接下调到 `LOOSE`，因为这种问法本质上更像跨段综合，而不是原子事实核验。这样后面检索、Judge 和回答模式都不需要再各自重新理解 query。” 
 
 ### 5.4 再讲双路检索
 
@@ -80,9 +80,9 @@
 
 ### 5.8 再讲统一证据评分器
 
-“真正决定文档能不能进入回答上下文的，不再是 scattered rules，而是 `UnifiedEvidenceScorer`。它会把 rerank、dense、BM25、RRF、coverage、identifier 这些信号统一成基础相关性，然后再叠加 topic alignment 和 selective LLM Judge。基础信号权重当前是：`rerank 0.42`、`dense 0.18`、`bm25 0.10`、`rrf 0.08`、`coverage 0.12`、`identifier 0.10`。topic alignment 的权重按防御画像区分：`STRICT 0.18`、`MODERATE 0.14`、`LOOSE 0.10`。Judge 信号权重是：`STRICT 0.24`、`MODERATE 0.18`、`LOOSE 0.0`。最终 `final_score` 不是手写 if-else 叠罚，而是把这些贡献项做加权平均之后，再结合门槛判断 usable。” 
+“真正决定文档能不能进入回答上下文的，不再是 scattered rules，而是 `UnifiedEvidenceScorer`。当前基础相关性已经收口成两项：`adaptive_score` 和 `rerank_score`，权重是 `0.50 / 0.50`。也就是说，粗排阶段融合好的 hybrid 信号不会在评分器里再用另一套 dense、BM25、RRF 权重重算一遍，而是直接和 cross-encoder rerank 一起构成 `base_relevance`。在这个基础上，再叠加 `topic_alignment` 和 selective LLM Judge。topic alignment 的权重按防御画像区分：`STRICT 0.18`、`MODERATE 0.14`、`LOOSE 0.10`。Judge 信号权重是：`STRICT 0.24`、`MODERATE 0.18`、`LOOSE 0.0`。最终 `final_score` 是这些贡献项的加权平均，不再是散落的 if-else 门直接拍板。” 
 
-“当前门槛也都是显式的。`MIN_BASE_RELEVANCE` 分别是：`STRICT 0.48`、`MODERATE 0.42`、`LOOSE 0.36`。`MIN_TOPIC_ALIGNMENT` 分别是：`STRICT 0.20`、`MODERATE 0.14`、`LOOSE 0.08`。`MIN_FINAL_SCORE` 分别是：`STRICT 0.58`、`MODERATE 0.52`、`LOOSE 0.46`。如果是 `STRICT + ATOMIC_SPAN` 场景，还必须满足 `direct_evidence = True`，否则直接拒掉。也就是说，现在谁能答、谁该拒答，是统一评分器决定的，不是 scattered gate 各自拍板。” 
+“当前门槛也都是显式的。`MIN_BASE_RELEVANCE` 分别是：`STRICT 0.48`、`MODERATE 0.42`、`LOOSE 0.36`，但它现在只保留为观测 flag，不再单独作为拒答分支。真正会拦截的是：`MIN_TOPIC_ALIGNMENT`，分别是 `STRICT 0.20`、`MODERATE 0.08`、`LOOSE 0.05`；以及 `MIN_FINAL_SCORE`，分别是 `STRICT 0.58`、`MODERATE 0.45`、`LOOSE 0.46`。如果是 `STRICT + ATOMIC_SPAN` 场景，还必须满足 `direct_evidence = True`，否则直接拒掉。无 Judge 场景下，`direct_evidence` 的兜底条件也已经放宽到 `topic_alignment >= 0.35 and (title_alignment >= 0.20 or base_relevance >= 0.52)`。” 
 
 ### 5.9 再讲 selective LLM Judge
 
@@ -90,11 +90,11 @@
 
 ### 5.10 再讲回答模式路由
 
-“完成统一评分之后，系统进入 `AnswerModeRouter`。如果没有任何 usable 文档，直接 `NO_CONTEXT`。如果是 `SUMMARY` 或 `OVERVIEW`，或者证据要求是 `FULL_DOCUMENT`，直接走 `GENERATIVE`。如果是 `RELATION` 或 `REASON`，而且 usable 文档不止一篇，也走 `GENERATIVE`。如果是短答案型问题，并且主文档有直接证据、支持抽取、而且主文档比分第二名高出至少 `0.12`，就走 `EXTRACTIVE`。否则短答案型问题走 `STRUCTURED`。这样回答模式不是靠 prompt 猜，而是显式路由。” 
+“完成统一评分之后，系统进入 `AnswerModeRouter`。如果没有任何 usable 文档，直接 `NO_CONTEXT`。如果是 `SUMMARY` 或 `OVERVIEW`，或者证据要求是 `FULL_DOCUMENT`，直接走 `GENERATIVE`。如果是 `RELATION` 或 `REASON`，而且 usable 文档不止一篇，也走 `GENERATIVE`。如果是单文档 `REASON`，则走 `STRUCTURED`。如果是短答案型问题，并且主文档有直接证据、支持抽取、而且主文档比分第二名高出至少 `0.12`，就走 `EXTRACTIVE`。其他短答案型问题走 `STRUCTURED`，剩余场景再回落到 `GENERATIVE`。也就是说，路由器本身保持克制，像“多信息 FACTOID”这类补修主要落在生成器的上下文策略，而不是在路由器里再开新分支。” 
 
 ### 5.11 最后讲生成器与优雅降级
 
-“当前生成层有三种模式。`ExtractiveGenerator` 优先从 Judge 的 `evidence_quote` 直接取证据；如果没有，再用段落窗口和句子窗口做轻量抽取，不引入复杂正则和重型 NLP。抽取失败时不会崩，而是抛出受控的 `FallbackRequiredError`，自动降级到 `STRUCTURED`。`StructuredGenerator` 会基于前两篇高分文档生成 1 到 3 句的直接回答。`GenerativeGenerator` 会基于前三篇文档做较完整的综合回答。整个降级链是：`EXTRACTIVE -> STRUCTURED -> GENERATIVE -> NO_CONTEXT`。当前最后一道稳定性机制是路由和优雅降级，而不是生成后再做一轮审核。” 
+“当前生成层有三种模式。`ExtractiveGenerator` 优先从 Judge 的 `evidence_quote` 直接取证据；如果没有，再用段落窗口和句子窗口做轻量抽取，不引入复杂正则和重型 NLP。对于多信息点落在相邻句子的情况，它还会尝试拼接 top-2 句，减少答案被单句截断。抽取失败时不会崩，而是抛出受控的 `FallbackRequiredError`，自动降级到 `STRUCTURED`。`StructuredGenerator` 默认基于前两篇文档生成直接回答，但对 `RELATION`、`REASON` 和多信息 FACTOID 会扩大上下文上限，并改为读取 `full_content`。`GenerativeGenerator` 默认基于前三篇文档综合回答，只有在 `SUMMARY / OVERVIEW` 上才切到 `full_content`，并把上下文上限提到 `5`。整个降级链仍然是：`EXTRACTIVE -> STRUCTURED -> GENERATIVE -> NO_CONTEXT`。当前最后一道稳定性机制是路由和优雅降级，而不是生成后再做一轮审核。” 
 
 ### 5.12 最后用一句话收束
 
@@ -102,12 +102,15 @@
 
 ## 6. 你要主动强调的“近期调整”
 
-老师如果追问你“最近又做了什么改动”，你就按下面四条说：
+老师如果追问你“最近又做了什么改动”，你就按下面几条说：
 
 1. 当前运行时入口已经从旧的大而全服务收口到 `RagService`，控制面明确拆成 `QueryIntentBuilder -> UnifiedEvidenceScorer -> AnswerModeRouter`。
-2. `Query Rewrite / HyDE / planner` 已从代码库移除，主链路只保留稳定、可解释的 query 处理。
+2. 历史检索增强模块已经从代码库清理，主链路只保留稳定、可解释的 query 处理。
 3. `LLM Judge` 已经接入，但只在 `STRICT` 高风险 query 上选择性启用，不做全量串行判断。
-4. 生成后已经没有 `Reflection` 审核层，不要再讲成“系统里还有保留开关”。
+4. 数据流已经改成“chunk 做评分和抽取，`full_content` 只在概况类生成和关系 Judge 上按需使用”，不再是整条链路统一读全文。
+5. 索引阶段新增了 `【核心主题：...】` 语义锚点注入，用来减少顺带提及误召回。
+6. 多实体、多信息问法已经补修，但方式不是加新架构，而是在意图、评分和生成器上下文策略里补齐。
+7. 生成后已经没有额外审核层，不要再讲成“系统里还有保留开关”。
 
 ## 7. 这几个设计点你要会解释
 
@@ -117,11 +120,11 @@
 
 “dense 很擅长语义近似，但对编号、短标题、专有名词、短实体不一定稳定。BM25 恰好补 dense 的短板，所以我不是把 BM25 当老办法，而是把它作为 hybrid 系统里不可替代的一条词法视图。” 
 
-### 7.2 为什么把 Query Rewrite 和 HyDE 彻底删掉
+### 7.2 为什么把历史检索增强模块彻底删掉
 
 推荐回答：
 
-“这两项探索过，但最后没有进入稳定运行面。它们会引入额外时延和不确定性，而且收益高度依赖 query 类型和语料域。为了让系统控制面更简单、配置更干净、联调口径更稳定，我把它们连同对应配置一起从代码库移除了。” 
+“这些探索过的增强模块最后没有进入稳定运行面。它们会引入额外时延和不确定性，而且收益高度依赖 query 类型和语料域。为了让系统控制面更简单、配置更干净、联调口径更稳定，我把它们连同对应配置一起从代码库移除了。” 
 
 ### 7.3 为什么 Judge 不是全量开启
 
@@ -135,11 +138,11 @@
 
 “事实型问题看起来适合抽句，但自然语言表达非常多样，硬拆主谓宾在工程上并不稳。我这里用的是轻量窗口定位和句级打分，抽取失败就优雅降级到结构化回答，宁可多说一点，也不返回半句废话。” 
 
-### 7.5 为什么当前不再设计 Reflection 层
+### 7.5 为什么当前不再设计额外的生成后审核层
 
 推荐回答：
 
-“生成后再做一轮审核会引入额外时延和新的不确定性，而且如果前面证据路由没做好，后处理审核也只是补丁。所以当前系统把稳定性前移到意图识别、统一评分和模式路由，不再保留 Reflection 层。” 
+“生成后再做一轮审核会引入额外时延和新的不确定性，而且如果前面证据路由没做好，后处理审核也只是补丁。所以当前系统把稳定性前移到意图识别、统一评分和模式路由，不再保留额外的生成后审核层。” 
 
 ## 8. 你最该背熟的配置和数字
 
@@ -169,8 +172,8 @@
 ### 8.4 关键门槛
 
 1. `MIN_BASE_RELEVANCE`: strict `0.48`，moderate `0.42`，loose `0.36`
-2. `MIN_TOPIC_ALIGNMENT`: strict `0.20`，moderate `0.14`，loose `0.08`
-3. `MIN_FINAL_SCORE`: strict `0.58`，moderate `0.52`，loose `0.46`
+2. `MIN_TOPIC_ALIGNMENT`: strict `0.20`，moderate `0.08`，loose `0.05`
+3. `MIN_FINAL_SCORE`: strict `0.58`，moderate `0.45`，loose `0.46`
 4. `PRIMARY_EVIDENCE_GAP = 0.12`
 
 ## 9. 一个稳妥的收尾
@@ -182,7 +185,7 @@
 ## 10. 答辩时不要讲错的几句话
 
 1. 不要再说“当前主入口是 `AgentService`”。
-2. 不要再说“当前代码里还保留着 reflection，随时可以打开”。
-3. 不要再说“`rewrite / HyDE` 还是系统里的可选在线流程”。
+2. 不要再说“当前代码里还保留着额外生成后审核层，随时可以打开”。
+3. 不要再说“历史检索增强模块还是系统里的可选在线流程”。
 4. 不要把旧的 `universal defense` 讲成当前唯一的主防御模块。
 5. 要明确现在的主控制面是 `QueryIntentBuilder -> UnifiedEvidenceScorer -> AnswerModeRouter`。

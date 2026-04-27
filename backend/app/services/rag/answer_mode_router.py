@@ -44,6 +44,26 @@ def _has_clear_primary_assessment(ranked_assessments: Sequence[EvidenceAssessmen
     return ranked_assessments[0].final_score >= ranked_assessments[1].final_score + PRIMARY_EVIDENCE_GAP
 
 
+def _unique_doc_count(assessments: Sequence[EvidenceAssessment]) -> int:
+    doc_keys: set[object] = set()
+    for assessment in assessments:
+        doc_id = assessment.candidate.doc_id
+        if doc_id is not None:
+            doc_keys.add(doc_id)
+            continue
+        title = assessment.candidate.title.strip()
+        if title:
+            doc_keys.add(title)
+    return len(doc_keys)
+
+
+def _is_multi_info_factoid(intent: QueryIntent) -> bool:
+    return (
+        intent.intent_type is QueryIntentType.FACTOID
+        and intent.evidence_requirement is EvidenceRequirement.MULTI_SPAN
+    ) or ('multi_info_query' in intent.trace_tags and intent.intent_type is QueryIntentType.FACTOID)
+
+
 class AnswerModeRouter:
     @classmethod
     def route(cls, intent: QueryIntent, usable_assessments: Sequence[EvidenceAssessment]) -> AnswerPlan:
@@ -51,6 +71,7 @@ class AnswerModeRouter:
         source_doc_ids = _source_doc_ids(ranked_assessments)
         primary = ranked_assessments[0] if ranked_assessments else None
         primary_doc_id = primary.candidate.doc_id if primary is not None else None
+        unique_doc_count = _unique_doc_count(ranked_assessments)
 
         if not ranked_assessments:
             return AnswerPlan(
@@ -82,19 +103,7 @@ class AnswerModeRouter:
                 trace_data={'usable_doc_count': len(ranked_assessments)},
             )
 
-        if intent.intent_type is QueryIntentType.RELATION and (
-            '共同点' in intent.normalized_query or '哪些人物' in intent.normalized_query
-        ):
-            return AnswerPlan(
-                mode=AnswerMode.GENERATIVE,
-                reason='relation_synthesis',
-                primary_doc_id=primary_doc_id,
-                source_doc_ids=source_doc_ids,
-                generator_name='generative_generator',
-                trace_data={'usable_doc_count': len(ranked_assessments)},
-            )
-
-        if len(ranked_assessments) > 1 and intent.intent_type in {
+        if unique_doc_count > 1 and intent.intent_type in {
             QueryIntentType.RELATION,
             QueryIntentType.REASON,
         }:
@@ -107,9 +116,33 @@ class AnswerModeRouter:
                 trace_data={'usable_doc_count': len(ranked_assessments)},
             )
 
+        if _is_multi_info_factoid(intent):
+            return AnswerPlan(
+                mode=AnswerMode.GENERATIVE,
+                reason='multi_info_factoid',
+                primary_doc_id=primary_doc_id,
+                source_doc_ids=source_doc_ids,
+                generator_name='generative_generator',
+                trace_data={'usable_doc_count': len(ranked_assessments)},
+            )
+
+        if intent.intent_type is QueryIntentType.REASON:
+            return AnswerPlan(
+                mode=AnswerMode.STRUCTURED,
+                reason='reason_query_requires_composed_answer',
+                primary_doc_id=primary_doc_id,
+                source_doc_ids=source_doc_ids,
+                generator_name='structured_generator',
+                trace_data={
+                    'usable_doc_count': len(ranked_assessments),
+                    'primary_score': primary.final_score if primary is not None else 0.0,
+                },
+            )
+
         if (
             primary is not None
             and intent.wants_short_answer
+            and intent.evidence_requirement is EvidenceRequirement.ATOMIC_SPAN
             and primary.direct_evidence
             and primary.supports_extractive
             and _has_clear_primary_assessment(ranked_assessments)

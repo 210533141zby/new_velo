@@ -76,9 +76,9 @@ query
 
 也就是说，现在不是“规则上面再补判断”，而是“意图驱动 + 统一评分 + 模式路由”。
 
-### 3.3 `Query Rewrite / HyDE / planner` 已从代码库移除
+### 3.3 历史检索增强模块已从代码库移除
 
-这一轮清理后，这三项不再是“保留但未挂接”，而是已经从代码库中彻底移除。
+这一轮清理后，这类历史增强模块不再是“保留但未挂接”，而是已经从代码库中彻底移除。
 
 这一步的意义是：
 
@@ -93,13 +93,13 @@ query
 当前逻辑是：
 
 1. `QueryIntentBuilder` 先给 query 打 `defense_profile`
-2. 只有 `STRICT` 防御画像才会触发 `needs_judge = True`
+2. 只有严格防御且符合原子证据要求的 query 才更容易触发 `needs_judge = True`
 3. `UnifiedEvidenceScorer` 才会并发调用 `judge_rag_document`
 
-当前会更容易走到 `STRICT` 的 query 类型主要是：
+当前更容易走到 Judge 的主要是：
 
 1. `LOOKUP`
-2. `RELATION`
+2. `LOCATION`
 3. 带明显 `X 的 Y` 属性结构的问题
 
 这意味着：
@@ -108,7 +108,7 @@ query
 2. Judge 不是默认替代所有规则
 3. Judge 是高风险 query 的语义复核层
 
-### 3.5 生成后 `reflection` 已从代码库移除
+### 3.5 生成后额外审核层已从代码库移除
 
 这一步同样需要写清楚。
 
@@ -117,23 +117,30 @@ query
 1. selective judge
 2. `EXTRACTIVE -> STRUCTURED -> GENERATIVE -> NO_CONTEXT` 的优雅降级
 
-也就是说，当前系统不再存在生成后 Reflection 审核层。
+也就是说，当前系统不再存在额外的生成后审核层。
 
-### 3.6 从 chunk 命中恢复成“文档级评分 + 文档级生成”
+### 3.6 从“chunk 命中后直接替换全文”修正为“chunk 评分 / 抽取 + 按需全文生成”
 
 这也是这轮很关键的收口。
 
-当前检索时仍然先命中 chunk，但在进入统一评分前会做一层恢复：
+当前检索时仍然先命中 chunk，但不再把 chunk 直接改写成全文去做后续所有判断。
 
-1. 用 chunk 命中分数保留召回信号
-2. 再把候选恢复为对应全文文档
-3. `UnifiedEvidenceScorer` 和后续生成都读取完整文档正文
+当前实际数据流是：
+
+1. `rag_service._build_retrieved_candidates()` 保留 `candidate.doc.page_content = chunk_text`
+2. 同时额外挂载 `candidate.chunk_text = chunk_text`
+3. 再额外挂载 `candidate.full_content = full_content`
+4. `UnifiedEvidenceScorer` 构造 `CandidateSnapshot` 时读取 chunk 文本做 `topic_alignment`
+5. `ExtractiveGenerator` 读取 chunk 文本做窗口抽取
+6. `GenerativeGenerator` 只在 `SUMMARY / OVERVIEW` 场景读取 `full_content`
+7. `RELATION` 类型的 Judge 为了减少跨段关系误杀，会优先读取 `full_content`
 
 这样做的原因是：
 
 1. 检索仍然保留 chunk 级命中灵敏度
-2. Judge 和生成不再只看碎片
-3. 对“建于哪一年”“正式名称是什么”“今年多少岁”这类事实问题更友好
+2. 评分和抽取不再被数万字全文稀释
+3. 只有真正需要文档级综合时才切到全文视角
+4. 事实型问题和短实体问题的可答性判断更稳定
 
 ### 3.7 多实体综合问题做了专项补修，但没有引入新架构
 
@@ -156,24 +163,103 @@ query
 1. `QueryIntentBuilder`
    - 在 `RELATION_MARKERS` 中加入 `共同点`
    - 明确识别 `X 和 Y 有什么共同点` 这类关系综合题
+   - 对 `RELATION + 共同点` 这类问法下调到 `DefenseProfile.LOOSE`，避免继续按单点精确问法过度拒答
 2. `UnifiedEvidenceScorer`
+   - `DefenseProfile.MODERATE` 的 `MIN_TOPIC_ALIGNMENT` 从 `0.14` 下调到 `0.08`
    - `DefenseProfile.LOOSE` 的 `MIN_TOPIC_ALIGNMENT` 从 `0.08` 下调到 `0.05`
+   - `DefenseProfile.MODERATE` 的 `MIN_FINAL_SCORE` 从 `0.52` 下调到 `0.45`
+   - `direct_evidence` 的无 Judge 兜底条件改成 `topic_alignment >= 0.35 and (title_alignment >= 0.20 or base_relevance >= 0.52)`
    - 对 `RELATION` 类型的 Judge 输入改为优先读取 `full_content`，不再只看单个 chunk
-3. `hybrid_search`
-   - 当向量命中的 chunk 与关键词压缩后的 query 重合太弱，而 BM25 明确命中文档时，允许回退到词法预览文档内容，减少“同文档选错 chunk”问题
-4. `AnswerModeRouter`
-   - `共同点`
-   - `哪些人物`
-   这两类关系综合题直接走 `GENERATIVE`
-5. `answer_generators`
-   - `SUMMARY / OVERVIEW` 的生成上下文上限从 `3` 提到 `5`
-   - `RELATION` 生成时的全文段落窗口从 `2` 提到 `4`
+3. `prompt_templates`
+   - Judge Prompt 新增“比较两个实体 / 询问共同点 / 询问文中人物及其与对象关系”规则
+   - 只要文档中明确给出了至少一侧人物或实体的身份、职责、参与方式、贡献或关系信息，就允许判为 `contains_direct_evidence = yes`
+4. `answer_generators`
+   - `MULTI_INFO_MARKERS` 新增 `分别`
+   - `RELATION / REASON` 默认视为多信息综合题
+   - `FACTOID` 里出现 `哪些 / 有哪些 / 什么角色 / 包括 / 包含 / 几个 / 多少 / 分别` 时，也会按多信息问题处理
+   - `StructuredGenerator` 对这类问题会扩大上下文上限，并改为读取 `full_content`
+   - `ExtractiveGenerator` 支持 top-2 句拼接，减少多信息点被单句截断
+5. `AnswerModeRouter`
+   - 当前没有单独为“多信息 FACTOID”新增特殊分支
+   - 真正的修正点落在 `multi_document_synthesis`、`structured_context_limit` 和 `structured_use_full_content`
+   - 也就是不改架构，只在已有评分、生成和路由边界内补能力
 
 这一轮的关键结论是：
 
 1. 多实体综合问题的核心矛盾不是“模型不会答”
 2. 而是“单 chunk 级直接证据判定不适合跨段综合问题”
 3. 所以当前修法仍然落在既有架构里：意图识别、统一评分、模式路由三层各补一点，而不是新增独立分支
+
+### 3.8 入库前新增轻量语义锚点注入
+
+这一项已经落进当前索引链路，不是实验分支。
+
+当前代码位置：
+
+- `backend/app/services/rag/vector_index_service.py`
+
+当前做法：
+
+1. 文档先按 Markdown 标题切分
+2. 再按 `chunk_size=1000`、`chunk_overlap=200` 递归切块
+3. 入库前调用 `_extract_core_entities(title, first_paragraph)`
+4. 使用 `jieba.posseg` 提取标题和首段中的名词
+5. 过滤 `文档 / 资料 / 介绍 / 内容 / 情况 / 背景 / 历史 / 概况 / 总结 / 概述 / 说明 / 方案 / 测试` 等停用词
+6. 取权重最高的 1 到 3 个实体，生成前缀 `【核心主题：实体1、实体2】`
+7. 把这个前缀注入每个 chunk 的 `page_content` 头部，再写入向量库
+
+这一项的目标不是生成更长文本，而是给召回侧补一个轻量实体锚点，减少：
+
+1. 文档只顺带提到某个地点或人物却被错误命中
+2. 标题主题和 chunk 内局部句子主题错位
+3. “新加坡的风景”这类顺带提及误召回
+
+### 3.9 Prompt 已去领域特调，保留通用防御逻辑
+
+这一轮还做了一次必须写进文档的收口：
+
+1. `build_general_rag_prompt()` 已删除“馆长年龄”“渔业”“沿海”“档案馆、论文、新闻”等特定领域示例
+2. 当前只保留两条通用约束：
+   - 概括类问题先回答用户真正问的对象
+   - 参考上下文如果只是顺带提到实体、没有直接讨论用户问的主题或关系，必须拒答
+3. `_history_paragraph_score()` 已从领域词改成通用历史词：
+   - 年份模式：`\d{4}年`
+   - 通用标志词：`最早 / 建于 / 创立 / 成立 / 起步 / 发展 / 后来 / 直到 / 最初 / 早期`
+
+这一步的意义是：
+
+1. 保护当前系统在本地知识库上有效
+2. 但不靠对《雾潮镇档案馆》文本做硬编码特调
+3. 方便后续把同一条链路拿去 RGB 这类公共数据集做对比
+
+### 3.10 已补齐“本地知识库 + RGB 公共基准”的双数据集评测链路
+
+为了避免只在本地语料上自证，本轮已经补了独立对比评测框架：
+
+- `llamaindex_rag_eval/compare_rag_systems.py`
+
+当前会对比：
+
+1. 自研 RAG
+2. 参照实现的 LlamaIndex RAG
+
+当前已落地的输出包括：
+
+1. `llamaindex_rag_eval/outputs/rag_comparison_summary.json`
+2. `llamaindex_rag_eval/outputs/rgb_rag_comparison_summary.json`
+3. `llamaindex_rag_eval/outputs/dataset_comparison_summary.svg`
+
+当前一组已保存结果显示：
+
+1. 本地知识库：
+   - 自研 RAG：`faithfulness 1.0`、`answer_relevancy 0.8112`、`accuracy 0.3`
+   - LlamaIndex：`faithfulness 0.85`、`answer_relevancy 0.8545`、`accuracy 0.2`
+2. RGB：
+   - 自研 RAG：`faithfulness 0.92`、`answer_relevancy 0.8113`、`context_precision 0.93`、`accuracy 0.8033`
+   - LlamaIndex：`faithfulness 0.8517`、`answer_relevancy 0.6429`、`context_precision 0.7333`、`accuracy 0.59`
+3. 代价也要诚实写清楚：
+   - RGB 上自研 RAG 的 `P95` 延迟约 `3597.06ms`
+   - LlamaIndex 对照约 `1412.95ms`
 
 ## 4. 主链路是怎么一步步演进到现在的
 
@@ -326,11 +412,11 @@ query
 当前处理方式：
 
 1. 检索先用 chunk 命中把候选找出来
-2. 候选恢复成完整文档
-3. `UnifiedEvidenceScorer` 判断是否存在直接证据
-4. `AnswerModeRouter` 在高置信单文档下路由到 `EXTRACTIVE`
-5. `ExtractiveGenerator` 先尝试直接使用 Judge 的 `evidence_quote`
-6. 若没有，再用段落窗口和句子窗口做轻量抽取
+2. `UnifiedEvidenceScorer` 在 chunk 上计算 `topic_alignment` 和 `direct_evidence`
+3. `AnswerModeRouter` 在高置信单文档下路由到 `EXTRACTIVE`
+4. `ExtractiveGenerator` 先尝试直接使用 Judge 的 `evidence_quote`
+5. 若没有，再对 chunk 做段落窗口和句子窗口抽取
+6. 如果 top-2 句得分接近，会尝试拼接两句，减少“角色 / 材料 / 列举项”丢失
 7. 抽取失败时优雅降级到 `STRUCTURED`
 
 对应收益：
@@ -352,7 +438,9 @@ query
 2. `evidence_requirement = FULL_DOCUMENT`
 3. `defense_profile = LOOSE`
 4. `AnswerModeRouter` 直接路由到 `GENERATIVE`
-5. `GenerativeGenerator` 读取多篇高分文档摘要块进行综合生成
+5. `GenerativeGenerator` 在这两类问题上读取 `full_content`
+6. 生成上下文上限从 `3` 提到 `5`
+7. 段落窗口会优先保留历史 / 概况相关段落，而不是只取单段最高分
 
 对应收益：
 
@@ -366,16 +454,16 @@ query
 ### 6.1 已从代码库移除或彻底淘汰的逻辑
 
 1. `AgentService` 作为主 RAG 执行入口
-2. `rewrite / HyDE / planner`
-3. `reflection`
+2. 历史检索增强模块
+3. 生成后额外审核层
 4. 用大量硬编码 query 规则驱动整个主流程的做法
 
 ### 6.2 不应再写成“当前运行态”的旧术语
 
 1. `AgentService.rag_qa`
 2. `universal defense 是当前唯一主防线`
-3. `reflection 是默认运行路径`
-4. `rewrite / HyDE 是默认主路径的一部分`
+3. `额外生成后审核层是默认运行路径`
+4. `历史检索增强模块仍是默认主路径的一部分`
 
 ## 7. 当前版本的主要收益
 
@@ -402,9 +490,9 @@ Judge 解决的是高风险 query 的语义错配问题，不是替代检索。
 1. 规则更多内化为意图识别和统一评分门槛
 2. 而不是散落在主流程 if-else 里
 
-### 8.3 生成后不再存在 Reflection 层
+### 8.3 生成后不再存在额外审核层
 
-当前如果还要补生成后审核，应该重新设计一套独立、可观测、可验证的后处理机制，而不是把旧 Reflection 逻辑原样接回。
+当前如果还要补生成后审核，应该重新设计一套独立、可观测、可验证的后处理机制，而不是把旧的历史逻辑原样接回。
 
 ## 9. 当前答辩时应该怎么表述这轮调整
 
@@ -414,4 +502,4 @@ Judge 解决的是高风险 query 的语义错配问题，不是替代检索。
 
 再补一句就够：
 
-`LLM Judge 已经采纳，但只在 STRICT 高风险 query 上选择性启用；生成阶段的稳定性来自模式路由和优雅降级，不再依赖 Reflection 层。`
+`LLM Judge 已经采纳，但只在高风险原子证据型 query 上选择性启用；生成阶段的稳定性来自模式路由和优雅降级，不再依赖额外审核层。`

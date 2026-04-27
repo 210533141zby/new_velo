@@ -44,12 +44,12 @@ MIN_BASE_RELEVANCE = {
 }
 MIN_TOPIC_ALIGNMENT = {
     DefenseProfile.STRICT: 0.20,
-    DefenseProfile.MODERATE: 0.14,
+    DefenseProfile.MODERATE: 0.08,
     DefenseProfile.LOOSE: 0.05,
 }
 MIN_FINAL_SCORE = {
     DefenseProfile.STRICT: 0.58,
-    DefenseProfile.MODERATE: 0.52,
+    DefenseProfile.MODERATE: 0.45,
     DefenseProfile.LOOSE: 0.46,
 }
 WEAK_EVIDENCE_THRESHOLD = 0.34
@@ -468,8 +468,8 @@ class UnifiedEvidenceScorer:
             return judge_decision.direct_evidence
         if intent.evidence_requirement is EvidenceRequirement.FULL_DOCUMENT:
             return False
-        return snapshot.topic_alignment >= 0.42 and (
-            snapshot.title_alignment >= 0.24 or base_relevance >= 0.58
+        return snapshot.topic_alignment >= 0.35 and (
+            snapshot.title_alignment >= 0.20 or base_relevance >= 0.52
         )
 
     def _determine_extractive_support(

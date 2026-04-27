@@ -141,6 +141,15 @@ async function fetchCompletion(prefix: string, suffix: string, triggerMode: Comp
   }
 }
 
+function isManualCompletionShortcut(event: KeyboardEvent) {
+  const isMod = event.ctrlKey || event.metaKey;
+  const isPlainMod = isMod && !event.altKey && !event.shiftKey;
+  const isCtrlOrCmdEnter = isPlainMod && event.key === 'Enter';
+  const isCtrlOrCmdSpace = isPlainMod && (event.code === 'Space' || event.key === ' ');
+  const isAltSlash = !isMod && event.altKey && !event.shiftKey && (event.code === 'Slash' || event.key === '/');
+  return isCtrlOrCmdEnter || isCtrlOrCmdSpace || isAltSlash;
+}
+
 async function triggerCoreCompletion(editorInstance: Editor, triggerMode: CompletionMode = 'manual') {
   if (isComposing.value) {
     return;
@@ -254,10 +263,7 @@ const GhostTextExtension = Extension.create({
             return ghostPluginKey.getState(state);
           },
           handleKeyDown(view: EditorView, event: KeyboardEvent) {
-            const isMod = event.ctrlKey || event.metaKey;
-            const isManualShortcut = (isMod && event.altKey) || (isMod && event.code === 'Space') || (isMod && event.key === 'Enter');
-
-            if (isManualShortcut) {
+            if (isManualCompletionShortcut(event)) {
               event.preventDefault();
               void triggerCoreCompletion(tiptapEditor, 'manual');
               return true;

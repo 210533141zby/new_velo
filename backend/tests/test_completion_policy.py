@@ -13,6 +13,8 @@ from app.services.completion.completion_policy import (
     get_profile,
     infer_completion_context,
     post_process_completion,
+    remove_leading_suffix_overlap,
+    trim_completion,
     truncate_context,
     violates_context_constraints,
 )
@@ -64,6 +66,35 @@ class CompletionPolicyTests(unittest.TestCase):
         instruction = build_context_instruction(context)
         self.assertIn('不要新起列表', instruction)
         self.assertIn('还包括', instruction)
+
+    def test_trim_completion_returns_empty_for_blank_text(self) -> None:
+        self.assertEqual(trim_completion('', 'manual'), '')
+        self.assertEqual(trim_completion('\n', 'manual'), '')
+
+    def test_post_process_returns_empty_when_suffix_overlap_consumes_candidate(self) -> None:
+        prefix = '人类线粒体DNA会'
+        suffix = '影响能量代谢\n争议点：后续研究认为这属于极罕见例外。'
+        context = infer_completion_context(prefix, 'markdown')
+        candidate = '影响能量代谢'
+        self.assertEqual(post_process_completion(candidate, prefix, suffix, context, 'manual'), '')
+
+    def test_remove_leading_suffix_overlap_strips_repeated_suffix_prefix(self) -> None:
+        suffix = '目前法医鉴定和祖先追溯仍基于母系遗传假设。'
+        candidate = '目前法医鉴定和祖先追溯仍基于母系遗传假设，因此mtDNA在这些领域中仍然发挥着核心作用。'
+        self.assertEqual(
+            remove_leading_suffix_overlap(candidate, suffix),
+            '，因此mtDNA在这些领域中仍然发挥着核心作用。',
+        )
+
+    def test_post_process_keeps_only_non_overlapping_tail_when_candidate_repeats_suffix_prefix(self) -> None:
+        prefix = '争议点：2018年《PNAS》报道了首例父系mtDNA传递病例。'
+        suffix = '目前法医鉴定和祖先追溯仍基于母系遗传假设。'
+        context = infer_completion_context(prefix, 'markdown')
+        candidate = '目前法医鉴定和祖先追溯仍基于母系遗传假设，因此mtDNA在这些领域中仍然发挥着核心作用。'
+        self.assertEqual(
+            post_process_completion(candidate, prefix, suffix, context, 'manual'),
+            '，因此mtDNA在这些领域中仍然发挥着核心作用。',
+        )
 
 
 class RagPromptTests(unittest.TestCase):

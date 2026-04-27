@@ -1,0 +1,12 @@
+requests
+chromadb
+sentence-transformers
+torch
+llama-index-core
+llama-index-llms-ollama
+llama-index-embeddings-ollama
+llama-index-vector-stores-chroma
+llama-index-retrievers-bm25
+llama-index-postprocessor-sbert-rerank
+ragas
+rapidfuzz

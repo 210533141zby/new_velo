@@ -1,0 +1,2 @@
+benchmark,sample_count,accuracy,refusal_rate,retrieval_hit_rate_at_3,avg_latency_sec
+RGB,300,0.4967,0.1167,0.52,1.2153

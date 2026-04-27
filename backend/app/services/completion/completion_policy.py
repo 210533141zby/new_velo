@@ -263,6 +263,20 @@ def remove_suffix_overlap(text: str, suffix: str) -> str:
     return text
 
 
+def remove_leading_suffix_overlap(text: str, suffix: str) -> str:
+    if not text or not suffix:
+        return text
+    safe_suffix = suffix.lstrip()
+    if not safe_suffix:
+        return text
+    max_overlap = min(len(text), len(safe_suffix))
+    min_overlap = 4 if contains_cjk(text[:max_overlap] + safe_suffix[:max_overlap]) else 6
+    for index in range(max_overlap, min_overlap - 1, -1):
+        if text[:index] == safe_suffix[:index]:
+            return text[index:]
+    return text
+
+
 def is_suffix_echo(text: str, suffix: str) -> bool:
     candidate = text.strip()
     safe_suffix = suffix.lstrip()
@@ -315,7 +329,12 @@ def is_recent_line_echo(text: str, recent_lines: tuple[str, ...]) -> bool:
 
 def trim_completion(text: str, trigger_mode: str | None) -> str:
     profile = get_profile(trigger_mode)
-    candidate = text.splitlines()[0].strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    candidate = lines[0].strip()
     if len(candidate) > profile.max_chars:
         candidate = candidate[: profile.max_chars].rstrip(" ，,。；;")
     return candidate
@@ -366,11 +385,25 @@ def post_process_completion(
     if not candidate:
         return ""
     candidate = remove_prefix_overlap(candidate, prefix).lstrip()
+    if not candidate:
+        return ""
+    candidate = remove_leading_suffix_overlap(candidate, suffix).lstrip()
+    if not candidate:
+        return ""
     candidate = remove_suffix_overlap(candidate, suffix).rstrip()
+    if not candidate:
+        return ""
     if is_suffix_echo(candidate, suffix):
         return ""
     candidate = trim_completion(candidate, trigger_mode)
+    if not candidate:
+        return ""
+    candidate = remove_leading_suffix_overlap(candidate, suffix).lstrip()
+    if not candidate:
+        return ""
     candidate = remove_suffix_overlap(candidate, suffix).rstrip()
+    if not candidate:
+        return ""
     if is_suffix_echo(candidate, suffix):
         return ""
     if violates_context_constraints(candidate, prefix, suffix, context):

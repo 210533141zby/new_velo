@@ -8,8 +8,10 @@ from app.services.rag.hybrid_search import has_identifier, tokenize_for_bm25
 from app.services.rag.pipeline_models import (
     AnswerMode,
     AnswerPlan,
+    EvidenceRequirement,
     EvidenceAssessment,
     QueryIntent,
+    QueryIntentType,
 )
 from app.services.rag.prompt_templates import (
     build_general_rag_prompt,
@@ -48,6 +50,22 @@ QUESTION_STOP_TOKENS = {
     '问题',
 }
 REASON_EVIDENCE_MARKERS = ('因为', '原因', '之所以')
+MULTI_INFO_MARKERS = ('哪些', '什么角色', '包括', '包含', '有哪些', '几个', '多少', '分别')
+GENERIC_ANSWER_PREFIXES = ('核心内容如下：', '核心内容：', '回答如下：', '答案如下：')
+GENERIC_META_MARKERS = ('来源：', '根据参考文档', '根据参考资料', '根据参考上下文')
+SUMMARY_ADVICE_MARKERS = ('建议', '提醒', '请注意', '需注意', '做好', '避免')
+CORRECTION_META_MARKERS = ('纠正说明', '更正说明', '修正说明', '无需纠正')
+REFUSAL_SENTENCE_MARKERS = (
+    '无法确定',
+    '无法回答',
+    '无法给出可靠回答',
+    '没有找到足够相关',
+    '资料不足',
+    '没有相关资料',
+    '未提及',
+    '未涉及',
+)
+LOW_RELEVANCE_EXTENSIONS = ('此外', '另外', '同时', '并且', '而且', '再者', '还有')
 
 
 class FallbackRequiredError(RuntimeError):
@@ -116,10 +134,10 @@ def _candidate_full_content(assessment: EvidenceAssessment) -> str:
 
 def _history_paragraph_score(query: str, paragraph: str, query_tokens: set[str]) -> float:
     score = _window_score(query, paragraph, query_tokens)
-    if re.search(r'(18|19|20)\d{2}', paragraph):
-        score += 0.12
-    if any(marker in paragraph for marker in ('最早', '建于', '起步', '早年', '后来', '直到', '沿海', '渔业', '捕鱼')):
-        score += 0.12
+    if re.search(r'\d{4}年', paragraph):
+        score += 0.10
+    if any(marker in paragraph for marker in ('最早', '建于', '创立', '成立', '起步', '发展', '后来', '直到', '最初', '早期')):
+        score += 0.10
     return score
 
 
@@ -129,6 +147,7 @@ def _build_context_excerpt(
     *,
     overview_mode: bool,
     relation_mode: bool,
+    correction_mode: bool,
     use_full_content: bool,
 ) -> str:
     raw_content = _candidate_full_content(assessment) if use_full_content else _candidate_chunk_text(assessment)
@@ -136,22 +155,23 @@ def _build_context_excerpt(
     if not paragraphs:
         return compact_text(raw_content, 2200)
 
-    query_tokens = _query_tokens(query if overview_mode else query, '' if overview_mode else assessment.candidate.title)
+    effective_query = _correction_anchor_text(query) if correction_mode else query
+    query_tokens = _query_tokens(effective_query if overview_mode or correction_mode else query, '' if overview_mode else assessment.candidate.title)
     if not query_tokens:
-        query_tokens = _query_tokens(query)
+        query_tokens = _query_tokens(effective_query)
 
     selected_indexes: list[int] = [0] if overview_mode else []
     ranked_paragraphs = sorted(
         range(len(paragraphs)),
         key=lambda index: (
-            _history_paragraph_score(query, paragraphs[index], query_tokens)
+            _history_paragraph_score(effective_query, paragraphs[index], query_tokens)
             if overview_mode
-            else _window_score(query, paragraphs[index], query_tokens),
+            else _window_score(effective_query, paragraphs[index], query_tokens),
             len(paragraphs[index]),
         ),
         reverse=True,
     )
-    target_count = 5 if overview_mode else 4 if relation_mode else 2
+    target_count = 5 if overview_mode else 4 if relation_mode or correction_mode else 2
     for index in ranked_paragraphs:
         if len(selected_indexes) >= target_count:
             break
@@ -172,12 +192,14 @@ def _context_blocks(
     blocks: list[str] = []
     overview_mode = intent.intent_type.name.lower() in {'summary', 'overview'}
     relation_mode = intent.intent_type.name.lower() == 'relation'
+    correction_mode = _is_correction_query(intent)
     for index, assessment in enumerate(assessments, start=1):
         content = _build_context_excerpt(
             query,
             assessment,
             overview_mode=overview_mode,
             relation_mode=relation_mode,
+            correction_mode=correction_mode,
             use_full_content=use_full_content,
         )
         blocks.append(
@@ -266,13 +288,284 @@ def _extractive_score(intent: QueryIntent, query: str, text: str, query_tokens: 
     return (score, _matched_token_count(text, query_tokens), len(text))
 
 
+def _is_multi_info_query(query: str, intent: QueryIntent) -> bool:
+    normalized_query = normalize_lookup_text(query)
+    return intent.intent_type in {QueryIntentType.RELATION, QueryIntentType.REASON} or (
+        intent.intent_type is QueryIntentType.FACTOID
+        and any(marker in normalized_query for marker in MULTI_INFO_MARKERS)
+    )
+
+
+def _is_correction_query(intent: QueryIntent) -> bool:
+    return 'correction_query' in intent.trace_tags
+
+
+def _extract_query_block(query: str, marker: str, end_markers: tuple[str, ...]) -> str:
+    boundary = f"(?:{'|'.join(end_markers)}|$)" if end_markers else '$'
+    pattern = rf'{re.escape(marker)}[:：]\s*(.*?){boundary}'
+    match = re.search(pattern, query, flags=re.S)
+    if not match:
+        return ''
+    return compact_text(match.group(1), 900)
+
+
+def _correction_anchor_text(query: str) -> str:
+    return _extract_query_block(query, '新闻开头', ('续写[:：]',)) or _extract_query_block(query, '原文', ('续写[:：]', '错误[:：]', '待纠正[:：]')) or query
+
+
+def _correction_continuation_text(query: str) -> str:
+    return _extract_query_block(query, '续写', tuple())
+
+
+def _structured_context_limit(query: str, intent: QueryIntent) -> int:
+    if intent.evidence_requirement is EvidenceRequirement.MULTI_SPAN:
+        return 5
+    if intent.intent_type is QueryIntentType.RELATION:
+        return 4
+    if intent.intent_type is QueryIntentType.REASON:
+        return 3
+    if _is_multi_info_query(query, intent):
+        return 4
+    return 2
+
+
+def _structured_use_full_content(query: str, intent: QueryIntent) -> bool:
+    return _is_multi_info_query(query, intent)
+
+
+def _support_windows(assessments: Sequence[EvidenceAssessment], *, use_full_content: bool) -> list[str]:
+    windows: list[str] = []
+    for assessment in assessments:
+        raw_content = _candidate_full_content(assessment) if use_full_content else _candidate_chunk_text(assessment)
+        for paragraph in split_paragraphs(raw_content):
+            compacted = compact_text(paragraph, 700)
+            if compacted:
+                windows.append(compacted)
+            if len(windows) >= 24:
+                return windows
+    return windows
+
+
+def _sentence_support_ratio(sentence: str, windows: Sequence[str]) -> float:
+    sentence_tokens = _window_tokens(sentence) - QUESTION_STOP_TOKENS
+    if not sentence_tokens:
+        return 1.0
+
+    normalized_sentence = normalize_lookup_text(sentence)
+    best_score = 0.0
+    for window in windows:
+        normalized_window = normalize_lookup_text(window)
+        if normalized_sentence and normalized_sentence in normalized_window:
+            return 1.0
+        best_score = max(best_score, _coverage_ratio(sentence_tokens, _window_tokens(window)))
+    return best_score
+
+
+def _strip_answer_prefixes(content: str) -> str:
+    cleaned = str(content or '').strip()
+    updated = True
+    while cleaned and updated:
+        updated = False
+        for prefix in GENERIC_ANSWER_PREFIXES:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix) :].lstrip()
+                updated = True
+    return cleaned
+
+
+def _is_meta_sentence(sentence: str, intent: QueryIntent) -> bool:
+    normalized_sentence = normalize_lookup_text(sentence)
+    if any(marker in normalized_sentence for marker in (normalize_lookup_text(item) for item in GENERIC_META_MARKERS)):
+        return True
+    if _is_correction_query(intent) and any(marker in normalized_sentence for marker in (normalize_lookup_text(item) for item in CORRECTION_META_MARKERS)):
+        return True
+    if intent.intent_type in {QueryIntentType.SUMMARY, QueryIntentType.OVERVIEW} and any(marker in sentence for marker in SUMMARY_ADVICE_MARKERS):
+        return True
+    return False
+
+
+def _is_refusal_sentence(sentence: str) -> bool:
+    normalized_sentence = normalize_lookup_text(sentence)
+    return any(marker in normalized_sentence for marker in (normalize_lookup_text(item) for item in REFUSAL_SENTENCE_MARKERS))
+
+
+def _looks_like_low_relevance_extension(sentence: str, *, query_score: float, matched_count: int) -> bool:
+    normalized_sentence = normalize_lookup_text(sentence)
+    return (
+        any(normalized_sentence.startswith(normalize_lookup_text(marker)) for marker in LOW_RELEVANCE_EXTENSIONS)
+        and query_score < 0.16
+        and matched_count < 2
+    )
+
+
+def _correction_selected_sentences(query: str, sentences: Sequence[str], windows: Sequence[str]) -> list[str]:
+    if not sentences:
+        return []
+
+    anchor_text = _correction_anchor_text(query)
+    continuation_text = _correction_continuation_text(query)
+    normalized_anchor = normalize_lookup_text(anchor_text)
+    continuation_tokens = _window_tokens(continuation_text)
+
+    filtered_sentences = [
+        sentence
+        for sentence in sentences
+        if normalize_lookup_text(sentence) and normalize_lookup_text(sentence) not in normalized_anchor
+    ]
+    if not filtered_sentences:
+        filtered_sentences = list(sentences)
+
+    scored: list[tuple[float, float, int, str]] = []
+    for index, sentence in enumerate(filtered_sentences):
+        continuation_score = _coverage_ratio(continuation_tokens, _window_tokens(sentence)) if continuation_tokens else 0.0
+        support_score = _sentence_support_ratio(sentence, windows)
+        scored.append((continuation_score, support_score, index, sentence))
+
+    if not scored:
+        return []
+
+    best_continuation = max(item[0] for item in scored)
+    selected = [
+        sentence
+        for continuation_score, support_score, _index, sentence in scored
+        if support_score >= 0.22 and continuation_score >= max(0.12, best_continuation - 0.10)
+    ]
+    if selected:
+        return selected[:2]
+
+    best_sentence = max(scored, key=lambda item: (item[1], item[0]))
+    return [best_sentence[3]]
+
+
+def _post_process_generative_answer(
+    query: str,
+    intent: QueryIntent,
+    content: str,
+    assessments: Sequence[EvidenceAssessment],
+    *,
+    use_full_content: bool,
+) -> str:
+    cleaned = _strip_answer_prefixes(content)
+    if _is_correction_query(intent):
+        for marker in CORRECTION_META_MARKERS:
+            position = cleaned.find(marker)
+            if position > 0:
+                cleaned = cleaned[:position].rstrip()
+                break
+
+    windows = _support_windows(assessments, use_full_content=use_full_content)
+    sentences = [_clean_extractive_sentence(sentence) for sentence in split_text_segments(cleaned)]
+    sentences = [sentence for sentence in sentences if sentence]
+    if not sentences:
+        return compact_text(cleaned, 1200)
+
+    if _is_correction_query(intent):
+        selected = _correction_selected_sentences(query, sentences, windows)
+        return compact_text(' '.join(selected) or cleaned, 320)
+
+    if len(sentences) == 1:
+        return compact_text(sentences[0], 1200)
+
+    query_tokens = _query_tokens(query)
+    scored_sentences: list[tuple[int, str, float, float, int, bool]] = []
+    for index, sentence in enumerate(sentences):
+        if _is_meta_sentence(sentence, intent):
+            continue
+        support_score = _sentence_support_ratio(sentence, windows)
+        query_score = _window_score(query, sentence, query_tokens) if query_tokens else 0.0
+        matched_count = _matched_token_count(sentence, query_tokens) if query_tokens else 0
+        scored_sentences.append(
+            (index, sentence, support_score, query_score, matched_count, _is_refusal_sentence(sentence))
+        )
+
+    kept: list[str] = []
+    refusal_candidates: list[str] = []
+    for index, sentence, support_score, query_score, matched_count, is_refusal in scored_sentences:
+        if is_refusal:
+            refusal_candidates.append(sentence)
+            continue
+        if _looks_like_low_relevance_extension(sentence, query_score=query_score, matched_count=matched_count):
+            continue
+        if support_score < (0.18 if index == 0 else 0.34):
+            continue
+        if intent.intent_type not in {QueryIntentType.SUMMARY, QueryIntentType.OVERVIEW}:
+            if query_tokens and not (
+                query_score >= (0.08 if index == 0 else 0.14)
+                or matched_count >= (1 if index == 0 else 2)
+            ):
+                continue
+        kept.append(sentence)
+
+    if kept:
+        return compact_text(' '.join(kept), 1200)
+    if refusal_candidates:
+        return compact_text(refusal_candidates[0], 240)
+    if scored_sentences:
+        fallback_sentence = max(scored_sentences, key=lambda item: (item[2], item[3], item[4], -item[0]))[1]
+        return compact_text(fallback_sentence, 240)
+    return compact_text(cleaned, 1200)
+
+
+def _usable_evidence_quote(value: str) -> str:
+    cleaned = compact_text(value, 240)
+    if not cleaned:
+        return ''
+    if len(cleaned) > 120:
+        return ''
+    if cleaned.count('：') > 1:
+        return ''
+    if ' - ' in cleaned or '•' in cleaned:
+        return ''
+    return cleaned
+
+
+def _meaningful_query_terms(query: str) -> list[tuple[int, str]]:
+    terms: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for token in tokenize_for_bm25(query):
+        normalized = normalize_lookup_text(token)
+        if (
+            not normalized
+            or normalized in QUESTION_STOP_TOKENS
+            or normalized in seen
+            or (len(normalized) <= 1 and not has_identifier(token))
+        ):
+            continue
+        seen.add(normalized)
+        priority = 2
+        if has_identifier(token):
+            priority = 0
+        elif len(normalized) >= 3:
+            priority = 1
+        terms.append((priority, str(token)))
+    return terms
+
+
+def _trim_to_relevant_start(query: str, value: str) -> str:
+    cleaned = _clean_extractive_sentence(value)
+    if not cleaned:
+        return ''
+    for priority in (0, 1, 2):
+        positions = [
+            cleaned.find(term)
+            for term_priority, term in _meaningful_query_terms(query)
+            if term_priority == priority and term and cleaned.find(term) >= 0
+        ]
+        if not positions:
+            continue
+        trimmed = cleaned[min(positions) :].lstrip('：:，,；; ')
+        return _clean_extractive_sentence(trimmed)
+    trimmed = cleaned.lstrip('：:，,；; ')
+    return _clean_extractive_sentence(trimmed)
+
+
 class ExtractiveGenerator:
     async def generate(self, query: str, intent: QueryIntent, assessments: Sequence[EvidenceAssessment]) -> str | None:
         primary = assessments[0] if assessments else None
         if primary is None:
             return None
 
-        evidence_quote = compact_text(primary.evidence_quote)
+        evidence_quote = _usable_evidence_quote(primary.evidence_quote)
         if evidence_quote:
             return evidence_quote
 
@@ -296,17 +589,32 @@ class ExtractiveGenerator:
         if not sentences:
             sentences = [best_window]
 
-        best_sentence = sorted(sentences, key=lambda sentence: _extractive_score(intent, query, sentence, query_tokens), reverse=True)[0]
-        cleaned_sentence = _clean_extractive_sentence(best_sentence)
-        if len(cleaned_sentence) < 6:
+        scored_sentences = sorted(
+            ((sentence, _extractive_score(intent, query, sentence, query_tokens)) for sentence in sentences),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        best_sentence = scored_sentences[0][0]
+        candidate_answer = _trim_to_relevant_start(query, best_sentence)
+        if len(scored_sentences) >= 2:
+            top1_score = scored_sentences[0][1][0]
+            top2_score = scored_sentences[1][1][0]
+            combined = _trim_to_relevant_start(
+                query,
+                f'{scored_sentences[0][0]} {scored_sentences[1][0]}'
+            )
+            if top1_score - top2_score < 0.15 and len(combined) <= 240:
+                candidate_answer = combined
+
+        if len(candidate_answer) < 6:
             return None
         required_hits = 1 if has_identifier(query) or len(query_tokens) <= 1 else min(2, len(query_tokens))
-        if _matched_token_count(cleaned_sentence, query_tokens) < required_hits:
+        if _matched_token_count(candidate_answer, query_tokens) < required_hits:
             return None
-        minimum_score = 0.24 if intent.intent_type.value == 'reason' and any(marker in cleaned_sentence for marker in REASON_EVIDENCE_MARKERS) else 0.58
-        if _window_score(query, cleaned_sentence, query_tokens) < minimum_score:
+        minimum_score = 0.24 if intent.intent_type.value == 'reason' and any(marker in candidate_answer for marker in REASON_EVIDENCE_MARKERS) else 0.58
+        if _window_score(query, candidate_answer, query_tokens) < minimum_score:
             return None
-        return compact_text(cleaned_sentence, 240)
+        return compact_text(candidate_answer, 240)
 
 
 class StructuredGenerator:
@@ -315,15 +623,29 @@ class StructuredGenerator:
 
     async def generate(self, query: str, intent: QueryIntent, assessments: Sequence[EvidenceAssessment]) -> str:
         primary = assessments[0] if assessments else None
-        if primary is not None and primary.answer_brief:
+        if (
+            primary is not None
+            and primary.answer_brief
+            and intent.evidence_requirement is EvidenceRequirement.ATOMIC_SPAN
+            and not _is_multi_info_query(query, intent)
+        ):
             return compact_text(primary.answer_brief, 160)
 
+        context_limit = _structured_context_limit(query, intent)
+        use_full_content = _structured_use_full_content(query, intent)
         prompt = build_structured_rag_prompt(
             query,
-            _context_blocks(query, intent, assessments[:2], use_full_content=False),
+            _context_blocks(query, intent, assessments[:context_limit], use_full_content=use_full_content),
         )
         response = await self.model_getter().ainvoke(prompt)
         content = compact_text(getattr(response, 'content', ''), 240)
+        content = _post_process_generative_answer(
+            query,
+            intent,
+            content,
+            assessments[:context_limit],
+            use_full_content=use_full_content,
+        )
         if not content:
             raise FallbackRequiredError('structured_empty')
         return content
@@ -334,13 +656,31 @@ class GenerativeGenerator:
         self.model_getter = model_getter
 
     async def generate(self, query: str, intent: QueryIntent, assessments: Sequence[EvidenceAssessment]) -> str:
-        context_limit = 5 if intent.intent_type.name.lower() in {'summary', 'overview'} else 3
+        correction_mode = _is_correction_query(intent)
+        use_full_content = intent.intent_type in {QueryIntentType.SUMMARY, QueryIntentType.OVERVIEW} or correction_mode
+        context_limit = 2 if correction_mode else 5 if use_full_content or intent.evidence_requirement is EvidenceRequirement.MULTI_SPAN else 3
+        warning = ''
+        if correction_mode:
+            warning = (
+                '这是纠错任务。请只输出应替换“续写”部分的修正后文本，不要重复新闻开头，'
+                '不要追加纠正说明、解释、来源或评价。'
+            )
+        elif intent.intent_type in {QueryIntentType.SUMMARY, QueryIntentType.OVERVIEW}:
+            warning = '这是概括任务。只保留与问题直接相关的核心事实，不要补充建议、评论、来源说明或未被问题要求的延伸信息。'
         prompt = build_general_rag_prompt(
             query,
-            _context_blocks(query, intent, assessments[:context_limit], use_full_content=True),
+            _context_blocks(query, intent, assessments[:context_limit], use_full_content=use_full_content),
+            warning=warning,
         )
         response = await self.model_getter().ainvoke(prompt)
         content = compact_text(getattr(response, 'content', ''), 1200)
+        content = _post_process_generative_answer(
+            query,
+            intent,
+            content,
+            assessments[:context_limit],
+            use_full_content=use_full_content,
+        )
         if not content:
             raise FallbackRequiredError('generative_empty')
         return content
@@ -370,10 +710,10 @@ class GeneratorFactory:
             return extracted, build_sources(selected[:1])
 
         if plan.mode is AnswerMode.STRUCTURED:
-            return await self.structured.generate(query, intent, selected), build_sources(selected[:2])
+            return await self.structured.generate(query, intent, selected), build_sources(selected[:5])
 
         if plan.mode is AnswerMode.GENERATIVE:
-            return await self.generative.generate(query, intent, selected), build_sources(selected[:3])
+            return await self.generative.generate(query, intent, selected), build_sources(selected[:5])
 
         return build_no_context_answer(), []
 

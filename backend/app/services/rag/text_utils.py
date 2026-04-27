@@ -11,7 +11,12 @@ def compact_text(value: str, limit: int | None = None) -> str:
 
 
 def split_text_segments(content: str) -> list[str]:
-    return [segment.strip() for segment in re.split(r'(?<=[。！？；])|\n+', content or '') if segment.strip()]
+    normalized = re.sub(
+        r'(?<=[\u4e00-\u9fff）】])\s*[-•]\s*(?=[\u4e00-\u9fff【（])',
+        '\n',
+        content or '',
+    )
+    return [segment.strip() for segment in re.split(r'(?<=[。！？；])|\n+', normalized) if segment.strip()]
 
 
 def split_paragraphs(content: str) -> list[str]:

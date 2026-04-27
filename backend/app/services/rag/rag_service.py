@@ -155,28 +155,32 @@ class RagService:
         return retrieved_candidates
 
     async def _retrieve_candidates(self, query: str, intent: QueryIntent) -> list[RetrievedCandidate]:
-        retrieval_limit = intent.retrieval_depth
+        vector_limit = max(intent.retrieval_depth, settings.RAG_VECTOR_SEARCH_LIMIT)
+        bm25_limit = max(intent.retrieval_depth, settings.RAG_BM25_SEARCH_LIMIT)
+        candidate_limit = max(intent.retrieval_depth, settings.RAG_HYBRID_CANDIDATE_LIMIT)
+        correction_query = 'correction_query' in intent.trace_tags
+        retrieval_query = intent.keyword_query if correction_query and intent.keyword_query.strip() else intent.normalized_query
         vector_matches = await run_in_threadpool(
             self.vector_store.similarity_search_with_relevance_scores,
-            intent.normalized_query,
-            retrieval_limit,
+            retrieval_query,
+            vector_limit,
         )
         collapsed_matches = self._collapse_scored_matches(query, vector_matches)
         active_documents = await self._load_active_documents()
         lexical_index = ensure_hybrid_index(active_documents) if hybrid_index_needs_refresh() else get_hybrid_index()
         document_by_id = {int(document.id): document for document in active_documents}
         candidate_matches = build_hybrid_candidates(
-            query,
+            retrieval_query if correction_query else query,
             collapsed_matches,
             lexical_index,
             bm25_query=intent.keyword_query,
-            vector_limit=retrieval_limit,
-            bm25_limit=retrieval_limit,
-            candidate_limit=retrieval_limit,
+            vector_limit=vector_limit,
+            bm25_limit=bm25_limit,
+            candidate_limit=candidate_limit,
         )
         rerank_scores = await run_in_threadpool(
             get_reranker().score_documents,
-            query,
+            retrieval_query if correction_query else query,
             [doc for doc, _score in candidate_matches],
         )
         return self._build_retrieved_candidates(candidate_matches, rerank_scores, document_by_id)

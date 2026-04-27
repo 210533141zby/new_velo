@@ -41,7 +41,7 @@
    - `QueryIntentBuilder`
    - `UnifiedEvidenceScorer`
    - `AnswerModeRouter`
-3. `Query Rewrite / HyDE / Reflection` 已从代码库移除。
+3. 早期探索过的额外检索增强和生成后审核逻辑，已经不属于当前代码库与运行面。
 
 ## 3. 当前模块分工
 
@@ -57,7 +57,7 @@
 2. 系统信息问题直接短路，不走知识库。
 3. 调 `QueryIntentBuilder.build()` 生成检索与防御参数。
 4. 调向量召回、BM25、hybrid 融合和 rerank。
-5. 把 chunk 级命中恢复成“文档级正文候选”。
+5. 构造同时包含 `chunk_text` 和 `full_content` 的候选对象，其中 `page_content` 保持为 chunk 文本。
 6. 调 `UnifiedEvidenceScorer` 做统一评分。
 7. 调 `AnswerModeRouter` 选回答模式。
 8. 调 `GeneratorFactory` 执行生成和优雅降级。
@@ -177,9 +177,10 @@
 职责：
 
 1. 文档切块
-2. metadata 注入
-3. Chroma 写入与删除
-4. Embedding 客户端构造
+2. 提取标题和首段中的核心实体，并注入 `【核心主题：...】` 前缀
+3. metadata 注入
+4. Chroma 写入与删除
+5. Embedding 客户端构造
 
 ## 4. 当前模型与组件选型
 
@@ -251,7 +252,7 @@
 8. 判定 `evidence_requirement`
 9. 判定 `needs_judge`
 
-检索前不再存在额外的 `query planner / rewrite / HyDE` 分支。
+检索前不再存在额外的历史检索增强分支。
 
 ### 5.2 检索中
 
@@ -323,12 +324,8 @@ RRF(doc) = Σ 1 / (60 + rank_i(doc))
 基础信号权重：
 
 ```text
-rerank_signal = 0.42
-dense_signal = 0.18
-bm25_signal = 0.10
-rrf_signal = 0.08
-coverage_signal = 0.12
-identifier_signal = 0.10
+adaptive_signal = 0.50
+rerank_signal = 0.50
 ```
 
 附加信号：
@@ -355,17 +352,23 @@ LOOSE = 0.36
 
 MIN_TOPIC_ALIGNMENT:
 STRICT = 0.20
-MODERATE = 0.14
-LOOSE = 0.08
+MODERATE = 0.08
+LOOSE = 0.05
 
 MIN_FINAL_SCORE:
 STRICT = 0.58
-MODERATE = 0.52
+MODERATE = 0.45
 LOOSE = 0.46
 
 WEAK_EVIDENCE_THRESHOLD = 0.34
 MAX_JUDGE_CANDIDATES = 3
 ```
+
+补充说明：
+
+1. `MIN_BASE_RELEVANCE` 现在只保留为观测 flag，不再单独作为拒答分支。
+2. `RELATION` 类型在 Judge 阶段会优先读取 `full_content`，减少跨段关系问题被单 chunk 误杀。
+3. 无 Judge 场景下，`direct_evidence` 的兜底条件为 `topic_alignment >= 0.35 and (title_alignment >= 0.20 or base_relevance >= 0.52)`。
 
 Judge 触发逻辑：
 
@@ -393,10 +396,11 @@ needs_judge = defense_profile is STRICT
 路由原则：
 
 1. 没有 usable 文档就 `NO_CONTEXT`
-2. `SUMMARY / OVERVIEW` 直接偏向 `GENERATIVE`
+2. `SUMMARY / OVERVIEW` 和 `FULL_DOCUMENT` 需求直接走 `GENERATIVE`
 3. 多文档 `RELATION / REASON` 偏向 `GENERATIVE`
-4. 单文档高置信直接证据偏向 `EXTRACTIVE`
-5. 其他短答型问题走 `STRUCTURED`
+4. 单文档 `REASON` 走 `STRUCTURED`
+5. 单文档高置信直接证据偏向 `EXTRACTIVE`
+6. 其他短答型问题走 `STRUCTURED`
 
 ### 5.6 抽取策略
 
@@ -408,8 +412,9 @@ needs_judge = defense_profile is STRICT
 2. 如果没有段落，就切句子窗口
 3. 用 query token overlap 给窗口打分
 4. 再给句子打分
-5. 返回原文句子
-6. 失败则优雅降级到 `STRUCTURED`
+5. 如果 top-2 句得分接近，会尝试拼接两句
+6. 返回原文句子
+7. 失败则优雅降级到 `STRUCTURED`
 
 原因类问题额外加了因果句偏置：
 
@@ -418,17 +423,11 @@ needs_judge = defense_profile is STRICT
 则在抽取排序里额外 +0.8
 ```
 
-### 5.7 当前已从代码库移除的旧能力
+### 5.7 当前已从代码库清理的历史逻辑
 
-以下能力已经不再保留在当前代码库中：
+一些早期探索过的额外检索增强和生成后审核逻辑，已经不再保留在当前代码库中。
 
-1. `Query Rewrite`
-2. `HyDE`
-3. `query planner`
-4. `Reflection`
-5. 对应的旧配置项和 Reflection Prompt
-
-答辩和联调都不应再把这些能力描述成当前系统组成部分。
+答辩和联调都不应再把这些历史逻辑描述成当前系统组成部分。
 
 ## 6. 当前最该固定的口径
 
@@ -438,4 +437,4 @@ needs_judge = defense_profile is STRICT
 2. `rerank` 是重要原子能力，但不再独占最终决策权
 3. 当前主路径已经从旧的多层补丁收口为纯管道
 4. `LLM Judge` 是选择性启用，不是全量启用
-5. 生成层的稳定性依赖模式路由和优雅降级，不再依赖 Reflection 审核层
+5. 生成层的稳定性依赖模式路由和优雅降级，不再依赖额外的生成后审核层

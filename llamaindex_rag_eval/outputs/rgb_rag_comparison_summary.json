@@ -1,0 +1,32 @@
+[
+  {
+    "dataset": "rgb",
+    "system": "internal_rag",
+    "faithfulness": 0.92,
+    "answer_relevancy": 0.8113,
+    "context_precision": 0.93,
+    "quality_sample_count": 50,
+    "latency_p50_ms": 1114.77,
+    "latency_p95_ms": 3597.06,
+    "latency_avg_ms": 1623.96,
+    "sample_count": 300,
+    "positive_sample_count": 300,
+    "accuracy": 0.8033,
+    "retrieval_hit_rate_at_3": 0.8533
+  },
+  {
+    "dataset": "rgb",
+    "system": "llamaindex",
+    "faithfulness": 0.8517,
+    "answer_relevancy": 0.6429,
+    "context_precision": 0.7333,
+    "quality_sample_count": 50,
+    "latency_p50_ms": 1021.2,
+    "latency_p95_ms": 1412.95,
+    "latency_avg_ms": 1069.88,
+    "sample_count": 300,
+    "positive_sample_count": 300,
+    "accuracy": 0.59,
+    "retrieval_hit_rate_at_3": 0.6033
+  }
+]

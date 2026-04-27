@@ -139,8 +139,8 @@ query 去噪 / 关键词视图
 其中：
 
 1. 当前默认主链路强调“意图路由 + 自适应 hybrid + 统一证据评分 + 模式路由”，不再使用旧的 `AgentService + universal defense` 叠加式结构。
-2. `LLM as a Judge` 只在 `STRICT` 防御画像下触发，当前主要覆盖短实体、关系型和 `X 的 Y` 属性型高风险 query。
-3. `Query Rewrite / HyDE / Reflection` 已从代码库移除，不属于当前运行面。
+2. `LLM as a Judge` 是选择性启用，当前更常覆盖短实体、地点和 `X 的 Y` 属性型高风险 query。
+3. 当前运行面不再引入额外的历史检索增强模块或额外生成后审核层。
 
 这条链路当前最核心的目标不是“尽量多答”，而是：
 
@@ -155,4 +155,4 @@ query 去噪 / 关键词视图
 2. `AnswerModeRouter + GeneratorFactory` 是当前回答分流主线。
 3. `LLM as a Judge` 只在高风险 query 上启用，当前由 `needs_judge = defense_profile is STRICT` 决定。
 4. `CoT` 没有外显成长链思维，当前只保留为结构化证据判别思路。
-5. `Query Rewrite / HyDE / Reflection` 已从代码库移除，答辩和联调都不要再讲成当前系统能力。
+5. 当前答辩和联调都只围绕真实在线主链路展开，不再把历史增强方案写成现有能力。

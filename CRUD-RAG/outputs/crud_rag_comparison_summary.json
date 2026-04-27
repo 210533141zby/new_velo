@@ -1,0 +1,30 @@
+[
+  {
+    "system": "internal_rag",
+    "faithfulness": 0.9201,
+    "answer_relevancy": 0.8494,
+    "context_precision": 0.9653,
+    "context_recall": 0.9333,
+    "ragas_sample_count": 24,
+    "noise_robustness": 0.6006,
+    "negative_rejection": 1.0,
+    "information_integration": 0.0,
+    "latency_p50_ms": 2248.12,
+    "latency_p95_ms": 3560.37,
+    "sample_count": 66
+  },
+  {
+    "system": "llamaindex",
+    "faithfulness": 0.9286,
+    "answer_relevancy": 0.7869,
+    "context_precision": 0.8785,
+    "context_recall": 0.875,
+    "ragas_sample_count": 24,
+    "noise_robustness": 0.2834,
+    "negative_rejection": 1.0,
+    "information_integration": 0.0,
+    "latency_p50_ms": 2730.05,
+    "latency_p95_ms": 3528.23,
+    "sample_count": 66
+  }
+]
