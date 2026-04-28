@@ -5,6 +5,24 @@ export interface CompletionRequestPayload {
   trigger_mode: 'manual' | 'auto';
 }
 
+export interface CompletionResponsePayload {
+  completion: string;
+  reason?: string | null;
+}
+
+export async function checkCompletionBackendHealth(signal?: AbortSignal) {
+  try {
+    const response = await fetch('/health', {
+      method: 'GET',
+      cache: 'no-store',
+      signal,
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function requestCompletion(payload: CompletionRequestPayload, signal: AbortSignal) {
   const response = await fetch('/api/v1/completion', {
     method: 'POST',
@@ -19,6 +37,9 @@ export async function requestCompletion(payload: CompletionRequestPayload, signa
     throw new Error(`Completion request failed: ${response.status}`);
   }
 
-  const result = (await response.json()) as { completion?: string };
-  return result.completion ?? '';
+  const result = (await response.json()) as CompletionResponsePayload;
+  return {
+    completion: result.completion ?? '',
+    reason: result.reason ?? null,
+  };
 }

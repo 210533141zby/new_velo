@@ -14,7 +14,6 @@
 =============================================================================
 """
 
-import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -28,7 +27,7 @@ from app.cache import redis_manager
 from app.core.config import settings
 from app.database import AsyncSessionLocal, engine
 from app.db_init import init_db
-from app.logger import InterceptHandler, ip_address_ctx, logger, request_id_ctx, user_id_ctx
+from app.logger import configure_standard_logging, ip_address_ctx, logger, request_id_ctx, user_id_ctx
 from app.services.completion.completion_service import close_completion_http_client
 from app.services.model_factory import get_chat_model
 from app.services.rag.rag_service import RagService
@@ -60,9 +59,7 @@ async def lifespan(app: FastAPI):
     FastAPI 推荐使用 lifespan 来替代旧版的 @app.on_event("startup")。
     它能更安全地管理那些需要在整个应用运行期间一直存在的资源（比如数据库连接）。
     """
-    logging.getLogger().handlers = [InterceptHandler()]
-    logging.getLogger("uvicorn.access").handlers = [InterceptHandler()]
-    logging.getLogger("uvicorn.error").handlers = [InterceptHandler()]
+    configure_standard_logging()
 
     logger.info("应用正在启动...", extra={"extra_data": {"event": "startup"}})
 

@@ -23,6 +23,10 @@ export default defineConfig(({ mode }) => {
           // 优先使用环境变量中的后端地址，否则回退到 localhost
           target: env.BACKEND_URL || 'http://localhost:8000',
           changeOrigin: true
+        },
+        '/health': {
+          target: env.BACKEND_URL || 'http://localhost:8000',
+          changeOrigin: true
         }
       }
     }

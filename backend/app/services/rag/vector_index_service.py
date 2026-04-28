@@ -71,7 +71,7 @@ def get_embeddings():
             CpuEmbeddingClient(settings.EMBEDDING_MODEL)
             if provider == 'huggingface'
             else OpenAIEmbeddings(
-                api_key=settings.OPENAI_API_KEY,
+                api_key=settings.llm_api_key,
                 base_url=settings.embedding_api_base,
                 model=settings.EMBEDDING_MODEL,
                 check_embedding_ctx_length=False,

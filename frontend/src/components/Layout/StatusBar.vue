@@ -7,6 +7,24 @@ const aiIndicatorClass = computed(() =>
   store.isAiThinking ? 'bg-[#D06847] ring-2 ring-[#D06847]/15' : 'bg-emerald-500 ring-2 ring-emerald-100',
 );
 const aiStatusText = computed(() => (store.isAiThinking ? 'Velo AI Thinking' : 'Velo AI Ready'));
+const completionStatusClass = computed(() => {
+  if (store.completionStatusTone === 'error') {
+    return 'border-red-200 bg-red-50 text-red-700';
+  }
+  if (store.completionStatusTone === 'warning') {
+    return 'border-amber-200 bg-amber-50 text-amber-700';
+  }
+  if (store.completionStatusTone === 'success') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  }
+  if (store.completionStatusTone === 'settled') {
+    return 'border-teal-200 bg-teal-50 text-teal-700';
+  }
+  if (store.completionStatusTone === 'info') {
+    return 'border-stone-200 bg-stone-50 text-stone-700';
+  }
+  return 'border-border-line bg-surface text-text-sub';
+});
 </script>
 
 <template>
@@ -26,6 +44,9 @@ const aiStatusText = computed(() => (store.isAiThinking ? 'Velo AI Thinking' : '
     <div class="flex items-center space-x-4">
       <div class="hidden cursor-pointer rounded-md px-2 py-1 font-medium transition-colors hover:bg-neutral-50 sm:block">
         Markdown
+      </div>
+      <div class="hidden rounded-md border px-2 py-1 font-medium md:block" :class="completionStatusClass">
+        {{ store.completionStatusMessage }}
       </div>
       <div class="flex items-center space-x-2 rounded-md border border-border-line bg-surface px-2 py-1 shadow-sm transition-colors hover:bg-neutral-50">
         <span class="h-1.5 w-1.5 rounded-full" :class="aiIndicatorClass"></span>

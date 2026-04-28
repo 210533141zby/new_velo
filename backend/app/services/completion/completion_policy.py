@@ -18,25 +18,20 @@ from typing import Literal
 
 CompletionTriggerMode = Literal["auto", "manual"]
 MARKDOWN_LANGUAGES = {"markdown", "md", "mdx"}
-GENERIC_COMPLETION_PATTERNS = (
-    "在当今社会",
-    "促进社会经济的发展",
-    "推动社会经济的发展",
-    "具有重要意义",
-    "起到重要作用",
-    "今天",
-    "进一步",
-    "值得注意的是",
-)
-GENERIC_LEAD_IN_PATTERNS = (
-    re.compile(r"^(?:[-*+]\s*)?.{0,24}(?:还包括|包括以下|如下|主要有|主要包括|可分为|分为以下).{0,12}[：:]$"),
-    re.compile(r"^(?:[-*+]\s*)?(?:以下|如下)[：:]$"),
-)
 MARKDOWN_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s*$")
 MARKDOWN_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
 MARKDOWN_HEADING_MARKER_RE = re.compile(r"^\s{0,3}#{1,6}\s*$")
 MARKDOWN_QUOTE_MARKER_RE = re.compile(r"^\s*>\s*$")
 MARKDOWN_BLOCK_START_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+|>\s+|```|~~~)")
+SENTENCE_END_RE = re.compile(r"[。！？!?；;]$")
+SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;]")
+ARABIC_DETAIL_RE = re.compile(r"\d+")
+CN_QUANT_DETAIL_RE = re.compile(
+    r"(?:数十|数百|数千|几十|几百|几千|[一二两三四五六七八九十百千万几]+)"
+    r"(?:年|月|日|天|周|次|册|份|个|项|页|篇|公里|分钟|小时)"
+)
+DETAIL_SPAN_MARKERS = ("长达", "历时", "跨度", "整个时期")
+UNFINISHED_TAIL_MARKERS = ("直到", "例如", "比如", "其中", "使得", "从而", "以及", "用于", "以便")
 
 
 @dataclass(frozen=True)
@@ -47,7 +42,6 @@ class CompletionProfile:
     prompt_suffix_window: int
     max_tokens: int
     timeout: float
-    max_chars: int
     temperature: float
     system_prompt: str
 
@@ -57,7 +51,6 @@ class CompletionContext:
     language: str
     block_kind: str
     prefer_sentence_continuation: bool
-    recent_lines: tuple[str, ...]
 
 
 COMPLETION_PROFILES = {
@@ -66,27 +59,25 @@ COMPLETION_PROFILES = {
         suffix_window=96,
         prompt_prefix_window=288,
         prompt_suffix_window=72,
-        max_tokens=20,
+        max_tokens=24,
         timeout=7.0,
-        max_chars=24,
-        temperature=0.10,
+        temperature=0.0,
         system_prompt=(
-            "你是中文写作补全器。请根据前文自然续写一小段具体、贴合语境的文本。"
-            "只输出要插入光标处的内容，不要解释，不要重复上下文，避免空泛套话。"
+            "你是中文写作补全助手。"
+            "只输出可直接插入光标处的中文文本，不要解释，不要复述题目，不要编造前后文未提供的新事实。"
         ),
     ),
     "manual": CompletionProfile(
-        prefix_window=896,
-        suffix_window=160,
-        prompt_prefix_window=512,
-        prompt_suffix_window=96,
-        max_tokens=28,
-        timeout=8.5,
-        max_chars=56,
-        temperature=0.15,
+        prefix_window=768,
+        suffix_window=128,
+        prompt_prefix_window=384,
+        prompt_suffix_window=80,
+        max_tokens=48,
+        timeout=10.0,
+        temperature=0.0,
         system_prompt=(
-            "你是中文写作补全器。任务是在前文和后文之间补出自然、具体、衔接紧密的文本。"
-            "只输出要插入光标处的内容，不要解释，不要重复上下文，避免空泛套话。"
+            "你是中文写作补全助手。"
+            "只输出可直接插入光标处的中文文本，不要解释，不要复述题目，不要编造前后文未提供的新事实。"
         ),
     ),
 }
@@ -113,11 +104,6 @@ def truncate_context(prefix: str, suffix: str, trigger_mode: str | None) -> tupl
     return prefix[-profile.prefix_window:], suffix[: profile.suffix_window]
 
 
-def recent_nonempty_lines(prefix: str, limit: int = 6) -> tuple[str, ...]:
-    lines = [line.strip() for line in prefix.splitlines() if line.strip()]
-    return tuple(lines[-limit:])
-
-
 def infer_completion_context(prefix: str, language: str | None) -> CompletionContext:
     current_line = prefix.rsplit("\n", 1)[-1] if prefix else ""
     normalized_language = normalize_language(language)
@@ -137,7 +123,6 @@ def infer_completion_context(prefix: str, language: str | None) -> CompletionCon
         language=normalized_language,
         block_kind=block_kind,
         prefer_sentence_continuation=bool(current_line.strip()) and block_kind in {"plain_text", "paragraph"},
-        recent_lines=recent_nonempty_lines(prefix),
     )
 
 
@@ -162,78 +147,95 @@ def build_context_instruction(context: CompletionContext) -> str:
     )
 
 
-def build_examples(context: CompletionContext) -> str:
-    if context.block_kind == "list_item_body":
+def build_retry_hint(previous_reject_reason: str | None) -> str:
+    if previous_reject_reason == "unfinished_bridge_tail":
         return (
-            "示例：\n"
-            "前文：\n## 主要措施\n\n- \n\n"
-            "补全文本：\n青苗法试图缓解农民在青黄不接时的借贷压力\n\n"
+            "上一次结果停在明显未说完的尾巴上。"
+            "这一次请输出一个可以直接插入的完整短句，不要以逗号、冒号或未完连接词收尾。"
         )
-    if context.block_kind == "paragraph":
+    if previous_reject_reason == "unsupported_quant_detail":
         return (
-            "示例（正确）：\n"
-            "前文：\n最新考古发现（郑州商税碑）显示部分州县商业税增长35%\n\n"
-            "续写文本：\n，说明部分地区的商业活力确有提升。\n\n"
-            "反例（不要这样写）：\n"
-            "续写文本：\n- 某项政策体系还包括：\n\n"
+            "上一次结果补入了前后文没有明示的数量、次数或时间跨度。"
+            "这一次请改为短而中性的承接句，不要新增任何数值、频率或跨度细节。"
         )
+    if previous_reject_reason == "fragmented_sentence_start":
+        return (
+            "上一次结果像从半句话中间截断的残片。"
+            "这一次必须从完整自然的句子开头开始，不要以上文缺失的谓语、连词或残句开头。"
+        )
+    if previous_reject_reason == "unterminated_sentence":
+        return (
+            "上一次结果停在未完成的句尾。"
+            "这一次请输出一个自然收束的完整句子，不要停在未完成短语上。"
+        )
+    if previous_reject_reason == "covered_by_suffix":
+        return (
+            "上一次结果和后文重复。"
+            "这一次不要重复后文已出现的信息，只有在确实需要桥接时才补一小段完整文本。"
+        )
+    if previous_reject_reason == "empty_model_response":
+        return "上一次没有生成任何可用内容。这一次请直接给出一小段完整、具体、可插入的文本。"
     return (
-        "示例：\n"
-        "前文：\n北宋时期，王安石推行新法的核心目标，是希望通过制度改革来\n\n"
-        "续写文本：\n提高财政收入和资源调配效率，\n\n"
+        "上一次结果为空、重复、结构不对或过于空泛。"
+        "这一次请务必给出具体、贴合上下文的补文，不要输出套话，不要生成新的 Markdown 结构。"
     )
 
 
-def build_prompt(
+def build_length_instruction(trigger_mode: str | None, has_suffix: bool) -> str:
+    mode = normalize_trigger_mode(trigger_mode)
+    if mode == "auto":
+        return "长度控制在半句话到一句话，通常不超过25个中文字符。"
+    if has_suffix:
+        return "长度控制在一句到两句话内，通常不超过80个中文字符。"
+    return "长度控制在一句话内，通常不超过60个中文字符。"
+
+
+def build_chat_messages(
     prefix: str,
     suffix: str,
     context: CompletionContext,
     trigger_mode: str | None,
     attempt: int,
-) -> str:
+    previous_reject_reason: str | None = None,
+) -> list[dict[str, str]]:
     profile = get_profile(trigger_mode)
     prefix_tail = prefix[-profile.prompt_prefix_window:]
     suffix_head = suffix[: profile.prompt_suffix_window]
-
-    retry_hint = ""
-    if attempt > 0:
-        retry_hint = (
-            "上一次结果为空、重复、结构不对或过于空泛。"
-            "这一次请务必给出具体、贴合上下文的补文，不要输出套话，不要生成新的 Markdown 结构。\n"
-        )
-
-    examples = build_examples(context)
     context_instruction = build_context_instruction(context)
-
+    retry_hint = build_retry_hint(previous_reject_reason) if attempt > 0 else ""
+    requirements = [
+        "只输出要插入光标处的文本，不要解释，不要加引号，不要加“补全文本：”之类标签。",
+        "必须同时和前文末尾、后文开头自然衔接。",
+        "不要重复前文或后文里已经出现的完整短语或句子。",
+        "不要引入前后文没有出现的新人物、新出处、新数据、新设定。",
+        "避免主观推断、评价或升华，优先只写前后文能够直接支持的承接句。",
+        "不得补充前后文未明示的数量、年份、时间跨度、范围或统计判断。",
+        "优先补事实承接、限定或转折，不要写空泛过渡套话，如“随着时间的推移”“值得注意的是”“这说明了”。",
+        context_instruction,
+        build_length_instruction(trigger_mode, bool(suffix_head)),
+    ]
+    if retry_hint:
+        requirements.append(retry_hint)
     if suffix_head:
-        user_prompt = (
-            f"{retry_hint}"
-            f"{examples}"
-            f"前文：\n{prefix_tail}\n\n"
-            f"后文：\n{suffix_head}\n\n"
-            f"要求：{context_instruction} 优先延续文中的关键词、人物、概念和语气；"
-            "不要重复前后文；不要写套话，如“在当今社会”“具有重要意义”。\n\n"
-            "补全文本：\n"
-        )
+        task = "在前文和后文之间补出一小段自然、具体、语义连贯的中文文本。"
+        sections = [
+            f"前文：\n{prefix_tail}",
+            f"后文：\n{suffix_head}",
+            f"任务：{task}",
+            "要求：\n" + "\n".join(f"{index}. {item}" for index, item in enumerate(requirements, start=1)),
+        ]
     else:
-        user_prompt = (
-            f"{retry_hint}"
-            f"{examples}"
-            f"前文：\n{prefix_tail}\n\n"
-            f"要求：{context_instruction} 续写要自然、具体，直接接着前文往下写；"
-            "不要重复前文；不要用“今天”“在当今社会”这种空泛开头。\n\n"
-            "续写文本：\n"
-        )
+        task = "沿着前文继续写一小段自然、具体、语义连贯的中文文本。"
+        sections = [
+            f"前文：\n{prefix_tail}",
+            f"任务：{task}",
+            "要求：\n" + "\n".join(f"{index}. {item}" for index, item in enumerate(requirements, start=1)),
+        ]
 
-    return (
-        "<|im_start|>system\n"
-        f"{profile.system_prompt}\n"
-        "<|im_end|>\n"
-        "<|im_start|>user\n"
-        f"{user_prompt}"
-        "<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
+    return [
+        {'role': 'system', 'content': profile.system_prompt},
+        {'role': 'user', 'content': "\n\n".join(sections)},
+    ]
 
 
 def contains_cjk(text: str) -> bool:
@@ -286,92 +288,191 @@ def is_suffix_echo(text: str, suffix: str) -> bool:
     return len(candidate) >= min_echo_length and safe_suffix.startswith(candidate)
 
 
-def build_stop_sequences(suffix: str, trigger_mode: str | None, attempt: int) -> list[str]:
-    stops = ["<|endoftext|>", "<|file_sep|>", "<|im_end|>", "\n"]
-    safe_suffix = suffix.lstrip()
-    if not safe_suffix or attempt > 0:
-        return stops
-
-    mode = normalize_trigger_mode(trigger_mode)
-    if contains_cjk(safe_suffix):
-        dynamic_stop = safe_suffix[:14] if mode == "manual" else safe_suffix[:8]
-        min_stop_length = 6 if mode == "manual" else 4
-    else:
-        dynamic_stop = safe_suffix[:24] if mode == "manual" else safe_suffix[:14]
-        min_stop_length = 10 if mode == "manual" else 6
-
-    if len(dynamic_stop) >= min_stop_length:
-        stops.append(dynamic_stop)
-    return stops
+def is_sentence_boundary_insertion(prefix: str, suffix: str) -> bool:
+    return bool(prefix.strip()) and bool(suffix.strip()) and bool(SENTENCE_END_RE.search(prefix.rstrip()))
 
 
-def normalize_compare_text(text: str) -> str:
-    return re.sub(r"\s+", "", text)
+def ends_with_terminal_punctuation(text: str) -> bool:
+    stripped = text.rstrip()
+    while stripped and stripped[-1] in '”’」』）》】)]':
+        stripped = stripped[:-1].rstrip()
+    return bool(stripped) and bool(SENTENCE_END_RE.search(stripped))
 
 
-def looks_like_generic_lead_in(text: str) -> bool:
-    candidate = text.strip()
-    return any(pattern.match(candidate) for pattern in GENERIC_LEAD_IN_PATTERNS)
-
-
-def is_recent_line_echo(text: str, recent_lines: tuple[str, ...]) -> bool:
-    candidate = normalize_compare_text(text.strip(" ，,。；;"))
-    if len(candidate) < 8:
+def has_fragmented_sentence_start(text: str, prefix: str, suffix: str) -> bool:
+    if not is_sentence_boundary_insertion(prefix, suffix):
         return False
-    for line in recent_lines:
-        normalized_line = normalize_compare_text(line)
-        if not normalized_line:
-            continue
-        if candidate == normalized_line or candidate in normalized_line or normalized_line in candidate:
+    first_match = SENTENCE_SPLIT_RE.search(text)
+    if not first_match:
+        return False
+    first_sentence = text[:first_match.start()].strip(" ，,、：:")
+    remaining = text[first_match.end():].strip()
+    return bool(remaining) and len(first_sentence) < 7
+
+
+def has_unterminated_sentence(text: str, prefix: str, suffix: str) -> bool:
+    if not is_sentence_boundary_insertion(prefix, suffix):
+        return False
+    cleaned = text.strip(" ，,、：:")
+    return len(cleaned) >= 12 and not ends_with_terminal_punctuation(text)
+
+
+def has_unsupported_quant_detail(text: str, prefix: str, suffix: str) -> bool:
+    combined = f"{prefix}\n{suffix}"
+    for match in ARABIC_DETAIL_RE.findall(text):
+        if match not in combined:
             return True
-    return False
+    for match in CN_QUANT_DETAIL_RE.findall(text):
+        if match not in combined:
+            return True
+    return any(marker in text and marker not in combined for marker in DETAIL_SPAN_MARKERS)
+
+
+def is_inline_enumeration_bridge(prefix: str, suffix: str, text: str) -> bool:
+    if not suffix.strip():
+        return False
+    candidate = text.strip()
+    prefix_tail = prefix.rstrip()
+    return bool(prefix_tail) and prefix_tail.endswith("、") and candidate.endswith("、")
+
+
+def has_short_non_terminal_bridge(text: str, prefix: str, suffix: str) -> bool:
+    if not suffix.strip():
+        return False
+    candidate = text.strip()
+    if not candidate or ends_with_terminal_punctuation(candidate):
+        return False
+    if is_inline_enumeration_bridge(prefix, suffix, candidate):
+        return False
+    return len(candidate.strip(" ，,、：:；;")) < 6
+
+
+def salvage_inline_enumeration_candidate(text: str, prefix: str, suffix: str) -> str:
+    candidate = text.strip()
+    if not candidate or not suffix.strip():
+        return candidate
+    if not prefix.rstrip().endswith("、"):
+        return candidate
+    if candidate.endswith("、") or ends_with_terminal_punctuation(candidate) or "，" not in candidate:
+        return candidate
+    head, tail = candidate.split("，", 1)
+    head = head.rstrip("、，").strip()
+    tail = tail.strip()
+    if not head or not tail:
+        return candidate
+    if not any(marker in tail for marker in UNFINISHED_TAIL_MARKERS) and len(tail.strip(" ，,、：:；;")) >= 8:
+        return candidate
+    return f"{head}、"
+
+
+def has_unfinished_bridge_tail(text: str, prefix: str, suffix: str) -> bool:
+    if not suffix.strip():
+        return False
+    candidate = text.strip()
+    if not candidate or ends_with_terminal_punctuation(candidate):
+        return False
+    if is_inline_enumeration_bridge(prefix, suffix, candidate):
+        return False
+    if candidate.endswith(("，", "、", "：", ":", "（", "(")):
+        return True
+    return any(candidate.endswith(marker) for marker in UNFINISHED_TAIL_MARKERS)
 
 
 def trim_completion(text: str, trigger_mode: str | None) -> str:
-    profile = get_profile(trigger_mode)
     if not text:
         return ""
-    lines = text.splitlines()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
-    candidate = lines[0].strip()
-    if len(candidate) > profile.max_chars:
-        candidate = candidate[: profile.max_chars].rstrip(" ，,。；;")
+    return lines[0]
+
+
+def normalize_completion_candidate(
+    text: str,
+    prefix: str,
+    suffix: str,
+    trigger_mode: str | None,
+) -> str:
+    candidate = trim_completion((text or "").strip(), trigger_mode)
+    if not candidate:
+        return ""
+    candidate = remove_prefix_overlap(candidate, prefix).lstrip()
+    candidate = remove_leading_suffix_overlap(candidate, suffix).lstrip()
+    candidate = remove_suffix_overlap(candidate, suffix).rstrip()
+    candidate = salvage_inline_enumeration_candidate(candidate, prefix, suffix)
     return candidate
 
 
-def violates_context_constraints(
+def validate_completion_candidate(
     text: str,
     prefix: str,
     suffix: str,
     context: CompletionContext,
-) -> bool:
+) -> str | None:
     candidate = text.strip()
     if not candidate:
-        return True
-    if any(pattern in candidate for pattern in GENERIC_COMPLETION_PATTERNS):
-        return True
-    if looks_like_generic_lead_in(candidate):
-        return True
-    if is_recent_line_echo(candidate, context.recent_lines):
-        return True
+        return "empty"
+    if has_short_non_terminal_bridge(candidate, prefix, suffix):
+        return "short_bridge_fragment"
+    if has_unfinished_bridge_tail(candidate, prefix, suffix):
+        return "unfinished_bridge_tail"
+    if has_unsupported_quant_detail(candidate, prefix, suffix):
+        return "unsupported_quant_detail"
+    if has_fragmented_sentence_start(candidate, prefix, suffix):
+        return "fragmented_sentence_start"
+    if has_unterminated_sentence(candidate, prefix, suffix):
+        return "unterminated_sentence"
     if prefix.rstrip().endswith(candidate):
-        return True
+        return "prefix_echo"
     if is_suffix_echo(candidate, suffix):
-        return True
+        return "suffix_echo"
     if not candidate.strip("，。；：,:!?！？、（）()《》“”‘’【】[]-— "):
-        return True
+        return "punctuation_only"
     if context.block_kind in {"paragraph", "plain_text"} and MARKDOWN_BLOCK_START_RE.match(candidate):
-        return True
+        return "unexpected_markdown_block"
     if context.block_kind == "list_item_body" and MARKDOWN_LIST_ITEM_RE.match(candidate):
-        return True
+        return "unexpected_list_marker"
     if context.block_kind == "heading_text" and (candidate.startswith("#") or MARKDOWN_BLOCK_START_RE.match(candidate)):
-        return True
+        return "unexpected_heading_block"
     if context.block_kind == "quote_body" and candidate.startswith(">"):
-        return True
+        return "unexpected_quote_marker"
     if context.prefer_sentence_continuation and candidate.endswith(("：", ":")):
-        return True
-    return False
+        return "trailing_colon"
+    return None
+
+
+def post_process_completion_with_reason(
+    text: str,
+    prefix: str,
+    suffix: str,
+    context: CompletionContext,
+    trigger_mode: str | None,
+) -> tuple[str, str | None]:
+    candidate = trim_completion((text or "").strip(), trigger_mode)
+    if not candidate:
+        return "", "empty_model_response"
+
+    candidate = remove_prefix_overlap(candidate, prefix).lstrip()
+    if not candidate:
+        return "", "prefix_echo"
+
+    candidate = remove_leading_suffix_overlap(candidate, suffix).lstrip()
+    if not candidate:
+        return "", "covered_by_suffix"
+
+    candidate = remove_suffix_overlap(candidate, suffix).rstrip()
+    if not candidate:
+        return "", "covered_by_suffix"
+
+    candidate = salvage_inline_enumeration_candidate(candidate, prefix, suffix)
+    reason = validate_completion_candidate(candidate, prefix, suffix, context)
+    if reason:
+        return "", reason
+
+    mode = normalize_trigger_mode(trigger_mode)
+    if len(candidate.strip(" ，,。；;")) < (4 if mode == "manual" else 2):
+        return "", "too_short"
+    return candidate, None
 
 
 def post_process_completion(
@@ -381,47 +482,5 @@ def post_process_completion(
     context: CompletionContext,
     trigger_mode: str | None,
 ) -> str:
-    candidate = (text or "").strip()
-    if not candidate:
-        return ""
-    candidate = remove_prefix_overlap(candidate, prefix).lstrip()
-    if not candidate:
-        return ""
-    candidate = remove_leading_suffix_overlap(candidate, suffix).lstrip()
-    if not candidate:
-        return ""
-    candidate = remove_suffix_overlap(candidate, suffix).rstrip()
-    if not candidate:
-        return ""
-    if is_suffix_echo(candidate, suffix):
-        return ""
-    candidate = trim_completion(candidate, trigger_mode)
-    if not candidate:
-        return ""
-    candidate = remove_leading_suffix_overlap(candidate, suffix).lstrip()
-    if not candidate:
-        return ""
-    candidate = remove_suffix_overlap(candidate, suffix).rstrip()
-    if not candidate:
-        return ""
-    if is_suffix_echo(candidate, suffix):
-        return ""
-    if violates_context_constraints(candidate, prefix, suffix, context):
-        return ""
+    candidate, _reason = post_process_completion_with_reason(text, prefix, suffix, context, trigger_mode)
     return candidate
-
-
-def is_low_quality_completion(
-    text: str,
-    prefix: str,
-    suffix: str,
-    context: CompletionContext,
-    trigger_mode: str | None,
-) -> bool:
-    candidate = text.strip(" ，,。；;")
-    if not candidate:
-        return True
-    if violates_context_constraints(candidate, prefix, suffix, context):
-        return True
-    mode = normalize_trigger_mode(trigger_mode)
-    return len(candidate) < (4 if mode == "manual" else 2)

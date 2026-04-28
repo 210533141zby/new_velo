@@ -24,9 +24,10 @@ import {
   ListOrdered,
   Minus,
   Quote,
+  Sparkles,
   Strikethrough,
 } from 'lucide-vue-next';
-import { requestCompletion } from '@/api/completion';
+import { checkCompletionBackendHealth, requestCompletion } from '@/api/completion';
 import { useEditorStore } from '@/stores/editorStore';
 
 const props = defineProps<{ modelValue: string }>();
@@ -42,27 +43,23 @@ const markdownParser = new MarkdownIt({ html: true, breaks: true });
 
 markdownParser.use(taskLists);
 
-const AUTO_COMPLETION_DEBOUNCE_MS = 120;
 const COMPLETION_REQUEST_TIMEOUT_MS = 9000;
-const COMPLETION_CONTEXT_PROFILES = {
-  manual: {
-    prefixWindow: 896,
-    suffixWindow: 160,
-  },
-  auto: {
-    prefixWindow: 512,
-    suffixWindow: 96,
-  },
-} as const;
+const CLIENT_PREFIX_WINDOW = 2400;
+const CLIENT_SUFFIX_WINDOW = 600;
 
-type CompletionMode = keyof typeof COMPLETION_CONTEXT_PROFILES;
+type CompletionMode = 'manual';
 type MarkdownStorage = {
   markdown: {
     getMarkdown(): string;
   };
 };
 
-let completionTimer: ReturnType<typeof setTimeout> | null = null;
+type CompletionFetchResult = {
+  completion: string;
+  reason: string | null;
+  failed: boolean;
+};
+
 let completionRequestVersion = 0;
 let activeCompletionAbortController: AbortController | null = null;
 let isApplyingExternalContent = false;
@@ -76,12 +73,37 @@ function dismissGhostText() {
   ghostPos.value = null;
 }
 
-function invalidatePendingCompletion() {
-  if (completionTimer) {
-    clearTimeout(completionTimer);
-    completionTimer = null;
-  }
+function setCompletionFeedback(message: string, tone: 'idle' | 'info' | 'success' | 'settled' | 'warning' | 'error' = 'info') {
+  store.setCompletionStatus(message, tone);
+}
 
+function describeEmptyCompletionReason(reason: string | null) {
+  if (reason === 'covered_by_suffix') {
+    return '后文已经衔接完整，无需补全';
+  }
+  if (reason === 'backend_unavailable') {
+    return '后端未就绪，请稍后重试';
+  }
+  if (reason === 'request_failed') {
+    return '补全服务暂时不可用';
+  }
+  if (reason === 'internal_error') {
+    return '补全服务暂时不可用';
+  }
+  return '当前位置暂时没有合适补全';
+}
+
+function getEmptyCompletionTone(reason: string | null) {
+  if (reason === 'backend_unavailable') {
+    return 'warning' as const;
+  }
+  if (reason === 'request_failed' || reason === 'internal_error') {
+    return 'error' as const;
+  }
+  return 'settled' as const;
+}
+
+function invalidatePendingCompletion() {
   if (activeCompletionAbortController) {
     activeCompletionAbortController.abort();
     activeCompletionAbortController = null;
@@ -100,9 +122,6 @@ function syncGhostDecoration(editorInstance?: Editor | null) {
 function clearGhostText(editorInstance?: Editor | null, shouldInvalidate = true) {
   if (shouldInvalidate) {
     invalidatePendingCompletion();
-  } else if (completionTimer) {
-    clearTimeout(completionTimer);
-    completionTimer = null;
   }
 
   if (!ghostText.value && ghostPos.value === null) {
@@ -113,13 +132,23 @@ function clearGhostText(editorInstance?: Editor | null, shouldInvalidate = true)
   syncGhostDecoration(editorInstance);
 }
 
-async function fetchCompletion(prefix: string, suffix: string, triggerMode: CompletionMode) {
+function getCompletionContext(editorInstance: Editor) {
+  const { state } = editorInstance;
+  const { from } = state.selection;
+  return {
+    prefix: state.doc.textBetween(Math.max(0, from - CLIENT_PREFIX_WINDOW), from, '\n'),
+    suffix: state.doc.textBetween(from, Math.min(state.doc.content.size, from + CLIENT_SUFFIX_WINDOW), '\n'),
+  };
+}
+
+async function fetchCompletion(prefix: string, suffix: string, triggerMode: CompletionMode): Promise<CompletionFetchResult> {
   const abortController = new AbortController();
   activeCompletionAbortController = abortController;
   const timeoutId = window.setTimeout(() => abortController.abort(), COMPLETION_REQUEST_TIMEOUT_MS);
+  store.setAiThinking(true);
 
   try {
-    return await requestCompletion(
+    const completion = await requestCompletion(
       {
         prefix,
         suffix,
@@ -128,13 +157,17 @@ async function fetchCompletion(prefix: string, suffix: string, triggerMode: Comp
       },
       abortController.signal,
     );
+    return { completion: completion.completion, reason: completion.reason, failed: false };
   } catch (error) {
     if (!abortController.signal.aborted) {
       console.error('[GhostDebug] 请求失败:', error);
+      const backendReady = await checkCompletionBackendHealth();
+      return { completion: '', reason: backendReady ? 'request_failed' : 'backend_unavailable', failed: true };
     }
-    return '';
+    return { completion: '', reason: null, failed: false };
   } finally {
     window.clearTimeout(timeoutId);
+    store.setAiThinking(false);
     if (activeCompletionAbortController === abortController) {
       activeCompletionAbortController = null;
     }
@@ -143,15 +176,15 @@ async function fetchCompletion(prefix: string, suffix: string, triggerMode: Comp
 
 function isManualCompletionShortcut(event: KeyboardEvent) {
   const isMod = event.ctrlKey || event.metaKey;
-  const isPlainMod = isMod && !event.altKey && !event.shiftKey;
-  const isCtrlOrCmdEnter = isPlainMod && event.key === 'Enter';
-  const isCtrlOrCmdSpace = isPlainMod && (event.code === 'Space' || event.key === ' ');
-  const isAltSlash = !isMod && event.altKey && !event.shiftKey && (event.code === 'Slash' || event.key === '/');
-  return isCtrlOrCmdEnter || isCtrlOrCmdSpace || isAltSlash;
+  return isMod && !event.altKey && !event.shiftKey && event.key === 'Enter';
 }
 
 async function triggerCoreCompletion(editorInstance: Editor, triggerMode: CompletionMode = 'manual') {
+  const isManualTrigger = triggerMode === 'manual';
   if (isComposing.value) {
+    if (isManualTrigger) {
+      setCompletionFeedback('输入法处理中，暂不补全', 'warning');
+    }
     return;
   }
 
@@ -160,6 +193,9 @@ async function triggerCoreCompletion(editorInstance: Editor, triggerMode: Comple
   const { state } = editorInstance;
   const { from, empty } = state.selection;
   if (!empty) {
+    if (isManualTrigger) {
+      setCompletionFeedback('仅支持单光标补全', 'warning');
+    }
     clearGhostText(editorInstance, false);
     return;
   }
@@ -169,22 +205,39 @@ async function triggerCoreCompletion(editorInstance: Editor, triggerMode: Comple
     syncGhostDecoration(editorInstance);
   }
 
-  const profile = COMPLETION_CONTEXT_PROFILES[triggerMode];
-  const prefix = state.doc.textBetween(Math.max(0, from - profile.prefixWindow), from, '\n');
-  const suffix = state.doc.textBetween(from, Math.min(state.doc.content.size, from + profile.suffixWindow), '\n');
+  const { prefix, suffix } = getCompletionContext(editorInstance);
 
   if (!prefix.trim()) {
+    if (isManualTrigger) {
+      setCompletionFeedback('光标前没有可补全文本', 'warning');
+    }
     clearGhostText(editorInstance, false);
     return;
   }
 
+  if (isManualTrigger) {
+    setCompletionFeedback('正在生成补全...', 'info');
+  }
+
   const requestVersion = completionRequestVersion;
-  const completion = await fetchCompletion(prefix, suffix, triggerMode);
+  const result = await fetchCompletion(prefix, suffix, triggerMode);
   if (requestVersion !== completionRequestVersion) {
     return;
   }
 
+  if (result.failed) {
+    if (isManualTrigger) {
+      setCompletionFeedback(describeEmptyCompletionReason(result.reason), 'error');
+    }
+    clearGhostText(editorInstance, false);
+    return;
+  }
+
+  const completion = result.completion;
   if (!completion) {
+    if (isManualTrigger) {
+      setCompletionFeedback(describeEmptyCompletionReason(result.reason), getEmptyCompletionTone(result.reason));
+    }
     clearGhostText(editorInstance, false);
     return;
   }
@@ -192,34 +245,15 @@ async function triggerCoreCompletion(editorInstance: Editor, triggerMode: Comple
   ghostText.value = completion;
   ghostPos.value = from;
   syncGhostDecoration(editorInstance);
+  setCompletionFeedback('已生成补全，按 Tab 接受', 'success');
 }
 
-function handleAutoCompletion(editorInstance: Editor) {
-  if (isComposing.value || !editorInstance.isFocused) {
+function triggerManualCompletion() {
+  if (!editorRef.value) {
     return;
   }
-
-  if (completionTimer) {
-    clearTimeout(completionTimer);
-  }
-
-  const { state } = editorInstance;
-  const { from, empty } = state.selection;
-  if (!empty) {
-    clearGhostText(editorInstance, false);
-    return;
-  }
-
-  const suffixCheck = state.doc.textBetween(from, Math.min(state.doc.content.size, from + 50), '\n');
-  if (suffixCheck.trim()) {
-    clearGhostText(editorInstance, false);
-    return;
-  }
-
-  completionTimer = setTimeout(() => {
-    completionTimer = null;
-    void triggerCoreCompletion(editorInstance, 'auto');
-  }, AUTO_COMPLETION_DEBOUNCE_MS);
+  editorRef.value.commands.focus();
+  void triggerCoreCompletion(editorRef.value, 'manual');
 }
 
 const ghostPluginKey = new PluginKey<DecorationSet>('ghostText');
@@ -273,12 +307,14 @@ const GhostTextExtension = Extension.create({
               event.preventDefault();
               view.dispatch(view.state.tr.insertText(ghostText.value, ghostPos.value));
               clearGhostText(tiptapEditor, false);
+              setCompletionFeedback('已接受补全', 'success');
               return true;
             }
 
             if (event.key === 'Escape' && ghostText.value) {
               event.preventDefault();
               clearGhostText(tiptapEditor, false);
+              setCompletionFeedback('已取消补全', 'info');
               return true;
             }
 
@@ -357,11 +393,6 @@ const editorRef = useEditor({
     handleDOMEvents: {
       compositionend: () => {
         isComposing.value = false;
-        setTimeout(() => {
-          if (editorRef.value) {
-            handleAutoCompletion(editorRef.value);
-          }
-        }, 0);
         return false;
       },
       compositionstart: () => {
@@ -374,14 +405,10 @@ const editorRef = useEditor({
   onCreate: ({ editor }) => {
     updateStats(editor);
   },
-  onUpdate: ({ editor, transaction }) => {
+  onUpdate: ({ editor }) => {
     const isExternalContentUpdate = isApplyingExternalContent;
     if (isExternalContentUpdate) {
       isApplyingExternalContent = false;
-    }
-
-    if (transaction.docChanged && !isComposing.value && !isExternalContentUpdate) {
-      handleAutoCompletion(editor);
     }
 
     if (!isExternalContentUpdate) {
@@ -474,6 +501,15 @@ onBeforeUnmount(() => {
         <div class="mx-1 h-4 w-px bg-stone-200"></div>
         <button @click="setHorizontalRule" class="rounded p-1.5 text-stone-500 hover:bg-stone-100" title="水平分割线">
           <Minus class="h-4 w-4" />
+        </button>
+        <div class="mx-1 h-4 w-px bg-stone-200"></div>
+        <button
+          @click="triggerManualCompletion"
+          class="inline-flex items-center gap-1 rounded-md border border-stone-200 px-2 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-100"
+          title="补全（Ctrl/Cmd + Enter）"
+        >
+          <Sparkles class="h-4 w-4" />
+          <span>补全</span>
         </button>
       </div>
     </div>

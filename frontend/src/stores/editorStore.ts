@@ -9,6 +9,8 @@ type CursorPosition = {
   col: number;
 };
 
+type CompletionStatusTone = 'idle' | 'info' | 'success' | 'settled' | 'warning' | 'error';
+
 const AUTO_SAVE_DELAY_MS = 2000;
 
 function sanitizeDocument(document: DocumentRecord): DocumentRecord {
@@ -27,6 +29,8 @@ export const useEditorStore = defineStore('editor', () => {
   const wordCount = ref(0);
   const cursorPosition = ref<CursorPosition>({ line: 1, col: 1 });
   const isAiThinking = ref(false);
+  const completionStatusMessage = ref('补全就绪');
+  const completionStatusTone = ref<CompletionStatusTone>('idle');
 
   let saveTimer: number | null = null;
   const loadedDocumentIds = new Set<number>();
@@ -315,6 +319,11 @@ export const useEditorStore = defineStore('editor', () => {
     isAiThinking.value = nextValue;
   }
 
+  function setCompletionStatus(message: string, tone: CompletionStatusTone = 'info') {
+    completionStatusMessage.value = message;
+    completionStatusTone.value = tone;
+  }
+
   function toggleSidebar() {
     isSidebarOpen.value = !isSidebarOpen.value;
   }
@@ -332,6 +341,8 @@ export const useEditorStore = defineStore('editor', () => {
     wordCount,
     cursorPosition,
     isAiThinking,
+    completionStatusMessage,
+    completionStatusTone,
     fetchDocuments,
     createDocument: createNewDocument,
     loadDocument,
@@ -341,6 +352,7 @@ export const useEditorStore = defineStore('editor', () => {
     updateTitle,
     updateStats,
     setAiThinking,
+    setCompletionStatus,
     toggleSidebar,
     toggleCopilot,
   };

@@ -10,7 +10,7 @@ const inputValue = ref('');
 const isSending = ref(false);
 const messagesContainer = ref<HTMLElement | null>(null);
 const messages = ref<ChatMessage[]>([
-  { id: 1, role: 'assistant', content: '你好！我是你的知识副驾。', mode: 'rag' },
+  { id: 1, role: 'assistant', content: '你好，我是你的知识库助手！', mode: 'rag' },
 ]);
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth') {

@@ -10,7 +10,7 @@ _rag_judge_model_instance = None
 
 def _build_chat_model(temperature: float = 0.3, max_tokens: int | None = None) -> ChatOpenAI:
     return ChatOpenAI(
-        api_key=settings.OPENAI_API_KEY,
+        api_key=settings.llm_api_key,
         base_url=settings.chat_api_base,
         model=settings.CHAT_MODEL,
         temperature=temperature,

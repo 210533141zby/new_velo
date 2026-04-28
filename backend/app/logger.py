@@ -15,11 +15,12 @@
 =============================================================================
 """
 
-import sys
-from pathlib import Path
-from loguru import logger
 import logging
 import contextvars
+import sys
+from pathlib import Path
+
+from loguru import logger
 
 # =============================================================================
 # 全局配置
@@ -39,6 +40,7 @@ ip_address_ctx = contextvars.ContextVar("ip_address", default=None)
 
 # 2. 移除 loguru 默认的处理器 (防止重复输出)
 logger.remove()
+STANDARD_LOG_RECORD_KEYS = set(logging.makeLogRecord({}).__dict__.keys())
 
 # =============================================================================
 # 日志过滤器 (Filter)
@@ -52,10 +54,38 @@ def context_filter(record):
         每次打印日志时，自动从 contextvars 里取出当前的 request_id 等信息，
         塞进日志记录的 `extra` 字段里，这样格式化字符串时就能用了。
     """
-    record["extra"]["request_id"] = request_id_ctx.get()
-    record["extra"]["user_id"] = user_id_ctx.get()
-    record["extra"]["ip_address"] = ip_address_ctx.get()
+    record["extra"]["request_id"] = request_id_ctx.get() or "-"
+    record["extra"]["user_id"] = user_id_ctx.get() or "-"
+    record["extra"]["ip_address"] = ip_address_ctx.get() or "-"
+    record["extra"]["duration_text"] = _format_duration(record["extra"].get("duration"))
+    record["extra"]["extra_data_text"] = _format_extra_data(record["extra"].get("extra_data"))
     return True
+
+
+def _truncate_log_value(value, limit=120):
+    text = value if isinstance(value, str) else repr(value)
+    text = text.replace("\n", "\\n")
+    if len(text) > limit:
+        return f"{text[:limit - 3]}..."
+    return text
+
+
+def _format_duration(duration):
+    if duration is None:
+        return ""
+    try:
+        return f" | duration_ms={float(duration):.1f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _format_extra_data(extra_data):
+    if not extra_data:
+        return ""
+    if isinstance(extra_data, dict):
+        parts = [f"{key}={_truncate_log_value(value)}" for key, value in extra_data.items()]
+        return " | " + " ".join(parts)
+    return f" | extra_data={_truncate_log_value(extra_data)}"
 
 # =============================================================================
 # 日志输出配置 (Sink)
@@ -68,7 +98,7 @@ logger.add(
     level="INFO",
     filter=context_filter,
     # 格式说明: 时间 | 级别 | 模块:函数:行号 | RequestID - 消息内容
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | <magenta>{extra[request_id]}</magenta> - <level>{message}</level>",
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | <magenta>{extra[request_id]}</magenta> - <level>{message}</level>{extra[duration_text]}{extra[extra_data_text]}",
     colorize=True,
 )
 
@@ -81,7 +111,7 @@ logger.add(
     rotation="10 MB", # 文件超过 10MB 就自动切割成新文件
     retention="10 days", # 只保留最近 10 天的日志，防止占满硬盘
     compression="zip", # 切割后的旧日志自动压缩，节省空间
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {extra[request_id]} | {extra[user_id]} | {extra[ip_address]} - {message}",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {extra[request_id]} | {extra[user_id]} | {extra[ip_address]} - {message}{extra[duration_text]}{extra[extra_data_text]}",
     encoding="utf-8"
 )
 
@@ -110,9 +140,35 @@ class InterceptHandler(logging.Handler):
             frame = frame.f_back
             depth += 1
 
-        logger.opt(depth=depth, exception=record.exc_info).log(
+        extra = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in STANDARD_LOG_RECORD_KEYS
+        }
+        bound_logger = logger.bind(**extra) if extra else logger
+
+        bound_logger.opt(depth=depth, exception=record.exc_info).log(
             level, record.getMessage()
         )
 
+
+def configure_standard_logging(level=logging.INFO):
+    root_logger = logging.getLogger()
+    root_logger.handlers = [InterceptHandler()]
+    root_logger.setLevel(level)
+
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        target_logger = logging.getLogger(logger_name)
+        target_logger.handlers = [InterceptHandler()]
+        target_logger.setLevel(level)
+        target_logger.propagate = False
+
 # 导出 logger 供其他模块使用
-__all__ = ["logger", "InterceptHandler", "request_id_ctx", "user_id_ctx", "ip_address_ctx"]
+__all__ = [
+    "logger",
+    "InterceptHandler",
+    "configure_standard_logging",
+    "request_id_ctx",
+    "user_id_ctx",
+    "ip_address_ctx",
+]
